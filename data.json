@@ -19,6 +19,31 @@
       "name": "Oon",
       "created_at": "2025-11-02T03:18:29.604655",
       "zone": null
+    },
+    "AgentA": {
+      "name": "AgentA",
+      "created_at": "2026-01-10T23:17:47.231155",
+      "zone": null
+    },
+    "AgentB": {
+      "name": "AgentB",
+      "created_at": "2026-01-10T23:17:47.233123",
+      "zone": null
+    },
+    "AgentC": {
+      "name": "AgentC",
+      "created_at": "2026-01-10T23:17:47.234122",
+      "zone": null
+    },
+    "Analisa EEG pro BrainSmart burnout": {
+      "name": "Analisa EEG pro BrainSmart burnout",
+      "created_at": "2026-01-10T23:28:23.615827",
+      "zone": null
+    },
+    "EEG data JSON aqui": {
+      "name": "EEG data JSON aqui",
+      "created_at": "2026-01-10T23:35:42.511334",
+      "zone": null
     }
   },
   "zones": {
@@ -30,6 +55,21 @@
     "Cosmos": {
       "name": "Cosmos",
       "created_at": "2025-11-02T02:47:20.772695",
+      "entities": []
+    },
+    "ZoneAlpha": {
+      "name": "ZoneAlpha",
+      "created_at": "2026-01-10T23:17:47.235122",
+      "entities": []
+    },
+    "ZoneBeta": {
+      "name": "ZoneBeta",
+      "created_at": "2026-01-10T23:17:47.236119",
+      "entities": []
+    },
+    "ZoneGamma": {
+      "name": "ZoneGamma",
+      "created_at": "2026-01-10T23:17:47.237122",
       "entities": []
     }
   },
