@@ -47,9 +47,14 @@ async def register_zone(request: ZoneRequest):  # ← ZoneRequest ao invés de Z
 
 @app.get("/zones")
 async def get_zones():
-    cursor = conn.execute("SELECT zone, token, expires FROM zones WHERE datetime(expires) > datetime('now')")
-    zones = [{"zone": row[0], "token": row[1], "expires": row[2]} for row in cursor.fetchall()]
-    return {"active_zones": zones}
+    cursor = None
+    try:
+        cursor = conn.execute("SELECT zone, token, expires FROM zones WHERE datetime(expires) > datetime('now')")
+        zones = [{"zone": row[0], "token": row[1], "expires": row[2]} for row in cursor.fetchall()]
+        return {"active_zones": zones}
+    finally:
+        if cursor:
+            cursor.close()
 
 @app.post("/tasks")
 @app.post("/tasks")
