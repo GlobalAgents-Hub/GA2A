@@ -1,0 +1,326 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 Add new dependencies to pyproject.toml": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239925118
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239938022
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787240018445
+      }
+    ],
+    "1.2 Create `src/a2a/mcp/` package with `__init__.py`": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239925373
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239938959
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787240019217
+      }
+    ],
+    "1.3 Implement `AsyncLoopRunner` in `src/a2a/mcp/loop_runner.py`": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239925529
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787240030156
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787240957913
+      }
+    ],
+    "1.4 Implement data models in `src/a2a/mcp/capabilities.py`": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239925667
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787240031132
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787240958766
+      }
+    ],
+    "2.1 Implement auth module in `src/a2a/mcp/auth.py`": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239925831
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787240970344
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787241839950
+      }
+    ],
+    "3.1 Implement `ZoneRegistry` in `src/a2a/mcp/registry.py`": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239925953
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787241868143
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242155446
+      }
+    ],
+    "4. Checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239926059
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244849322
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787245202395
+      }
+    ],
+    "5.1 Implement `MCPServerHost` in `src/a2a/mcp/server.py`": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239926167
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242164006
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242642602
+      }
+    ],
+    "5.2 Implement error hierarchy in `src/a2a/mcp/server.py` (or separate `errors.py`)": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239926297
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787241868831
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242156683
+      }
+    ],
+    "6.1 Implement `MCPClientPool` in `src/a2a/mcp/client.py`": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239926405
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242163938
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242643477
+      }
+    ],
+    "7.1 Implement `TransportBridge` in `src/a2a/mcp/bridge.py`": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239926506
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242649327
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244432218
+      }
+    ],
+    "8. Checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239926596
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244850067
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787245203138
+      }
+    ],
+    "9.1 Extend `Peer` class in `src/a2a/agents.py` with MCP capabilities": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239926697
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242650503
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244433139
+      }
+    ],
+    "9.2 Update `AgentBuilder` to support MCP configuration": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239926841
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244439676
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244842553
+      }
+    ],
+    "9.3 Update `src/a2a/__init__.py` to export new MCP classes": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239926969
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244440646
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244842354
+      }
+    ],
+    "11. Final checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787239927073
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244850907
+      },
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787245203869
+      }
+    ],
+    "1. Project setup and infrastructure": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787240958912
+      }
+    ],
+    "2. Authentication module": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787241840071
+      }
+    ],
+    "3. Zone Registry": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242155547
+      }
+    ],
+    "5. MCP Server Host": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242642703
+      }
+    ],
+    "6. MCP Client Pool": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787242643612
+      }
+    ],
+    "7. Transport Bridge": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244432327
+      }
+    ],
+    "9. Peer integration and wiring": [
+      {
+        "executionId": "e48864c1-d89e-402c-b893-806b6379f8be",
+        "chatSessionId": "sess_d246df7b-3288-4ac9-8f2a-d4e7887d11dd",
+        "timestamp": 1787244842629
+      }
+    ]
+  }
+}

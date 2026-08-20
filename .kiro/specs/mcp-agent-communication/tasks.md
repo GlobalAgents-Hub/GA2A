@@ -6,25 +6,25 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
 
 ## Tasks
 
-- [ ] 1. Project setup and infrastructure
-  - [ ] 1.1 Add new dependencies to pyproject.toml
+- [x] 1. Project setup and infrastructure
+  - [x] 1.1 Add new dependencies to pyproject.toml
     - Add `mcp>=2.0.0`, `uvicorn>=0.30.0`, `httpx>=0.27.0` to `[project.dependencies]`
     - Add `hypothesis>=6.100.0`, `pytest-asyncio>=0.23.0` to `[project.optional-dependencies].dev`
     - _Requirements: 1.4, 2.2_
 
-  - [ ] 1.2 Create `src/a2a/mcp/` package with `__init__.py`
+  - [x] 1.2 Create `src/a2a/mcp/` package with `__init__.py`
     - Create directory structure `src/a2a/mcp/`
     - Create `__init__.py` that exports all public classes
     - _Requirements: 8.1, 8.2_
 
-  - [ ] 1.3 Implement `AsyncLoopRunner` in `src/a2a/mcp/loop_runner.py`
+  - [x] 1.3 Implement `AsyncLoopRunner` in `src/a2a/mcp/loop_runner.py`
     - Implement background thread running a dedicated asyncio event loop
     - Implement `start()`, `stop()`, `run_coroutine()`, `schedule()` methods
     - Implement `loop` property
     - Ensure thread-safe coroutine submission from synchronous code
     - _Requirements: 1.1, 2.1_
 
-  - [ ] 1.4 Implement data models in `src/a2a/mcp/capabilities.py`
+  - [x] 1.4 Implement data models in `src/a2a/mcp/capabilities.py`
     - Implement `ToolDescriptor`, `ResourceDescriptor`, `PromptDescriptor` dataclasses
     - Implement `CapabilityCard` dataclass with all fields (agent_name, agent_role, endpoint, transport_type, zone_name, tools, resources, prompts, published_at, version)
     - Implement `ToolResult` and `ResourceContent` dataclasses
@@ -35,8 +35,8 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
     - **Property 1: Capability Card Round-Trip Serialization**
     - **Validates: Requirements 3.3**
 
-- [ ] 2. Authentication module
-  - [ ] 2.1 Implement auth module in `src/a2a/mcp/auth.py`
+- [x] 2. Authentication module
+  - [x] 2.1 Implement auth module in `src/a2a/mcp/auth.py`
     - Implement `AuthToken` dataclass with fields: agent_name, zone_name, issued_at, expires_at, signature
     - Implement `AuthProvider` class with `generate_token(zone_name)` method using HMAC-SHA256
     - Implement `AuthValidator` class with `validate_token(token_str)` and `is_zone_member(token)` methods
@@ -52,8 +52,8 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
     - **Property 7: Auth Token Expiry**
     - **Validates: Requirements 7.4**
 
-- [ ] 3. Zone Registry
-  - [ ] 3.1 Implement `ZoneRegistry` in `src/a2a/mcp/registry.py`
+- [x] 3. Zone Registry
+  - [x] 3.1 Implement `ZoneRegistry` in `src/a2a/mcp/registry.py`
     - Implement `__init__(zone_name, event_handler)` storing zone name and reference to EventHandler
     - Implement `register(card)` that stores card and emits "capability_added" event
     - Implement `deregister(agent_name)` that removes card and emits "capability_removed" event
@@ -75,11 +75,11 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
     - **Property 4: Deregistration Completeness**
     - **Validates: Requirements 3.4, 9.2**
 
-- [ ] 4. Checkpoint - Ensure all tests pass
+- [x] 4. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 5. MCP Server Host
-  - [ ] 5.1 Implement `MCPServerHost` in `src/a2a/mcp/server.py`
+- [x] 5. MCP Server Host
+  - [x] 5.1 Implement `MCPServerHost` in `src/a2a/mcp/server.py`
     - Implement `__init__(agent_name, port, loop_runner, auth_validator)` storing configuration
     - Implement `register_tool(name, handler, description, input_schema)` and `deregister_tool(name)`
     - Implement `register_resource(uri, handler, description, mime_type)` and `deregister_resource(uri)`
@@ -91,7 +91,7 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
     - Raise `MCPPortConflictError` if port binding fails
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 9.1, 9.2, 9.4_
 
-  - [ ] 5.2 Implement error hierarchy in `src/a2a/mcp/server.py` (or separate `errors.py`)
+  - [x] 5.2 Implement error hierarchy in `src/a2a/mcp/server.py` (or separate `errors.py`)
     - Define `MCPError`, `MCPPortConflictError`, `MCPConnectionError`, `MCPAuthError`, `MCPToolError`, `MCPSchemaValidationError`, `MCPCapabilityCardError`
     - _Requirements: 1.3, 6.3, 7.4_
 
@@ -103,8 +103,8 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
     - **Property 9: Dynamic Deregistration Invisibility**
     - **Validates: Requirements 9.2**
 
-- [ ] 6. MCP Client Pool
-  - [ ] 6.1 Implement `MCPClientPool` in `src/a2a/mcp/client.py`
+- [x] 6. MCP Client Pool
+  - [x] 6.1 Implement `MCPClientPool` in `src/a2a/mcp/client.py`
     - Implement `__init__(agent_name, zone_name, loop_runner, auth_provider)` storing configuration
     - Implement `connect(endpoint, capability_card)` that establishes an MCP client session using the `mcp` SDK's `Client` over Streamable HTTP
     - Implement `disconnect(agent_name)` that closes the client session
@@ -121,8 +121,8 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
     - **Property 5: Tool Schema Validation Rejection**
     - **Validates: Requirements 6.4**
 
-- [ ] 7. Transport Bridge
-  - [ ] 7.1 Implement `TransportBridge` in `src/a2a/mcp/bridge.py`
+- [x] 7. Transport Bridge
+  - [x] 7.1 Implement `TransportBridge` in `src/a2a/mcp/bridge.py`
     - Implement `__init__(discovery, registries, event_handler, loop_runner, health_check_interval)`
     - Implement `start()` that hooks into NetworkDiscovery events and starts health check loop
     - Implement `stop()` that removes hooks and stops health check loop
@@ -138,11 +138,11 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
     - **Property 10: Transport Bridge Peer-to-Card Mapping**
     - **Validates: Requirements 5.1, 5.3**
 
-- [ ] 8. Checkpoint - Ensure all tests pass
+- [x] 8. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 9. Peer integration and wiring
-  - [ ] 9.1 Extend `Peer` class in `src/a2a/agents.py` with MCP capabilities
+- [x] 9. Peer integration and wiring
+  - [x] 9.1 Extend `Peer` class in `src/a2a/agents.py` with MCP capabilities
     - Add optional fields: `mcp_port`, `mcp_tools`, `mcp_resources`, `mcp_prompts` to the `Peer` dataclass
     - Add `mcp_enabled` property returning `True` if `mcp_port` is not None
     - Add `mcp_server` and `mcp_clients` properties
@@ -153,12 +153,12 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
     - Ensure `start()` and `stop()` remain unchanged for non-MCP peers
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 9.1, 9.2, 9.3, 9.4_
 
-  - [ ] 9.2 Update `AgentBuilder` to support MCP configuration
+  - [x] 9.2 Update `AgentBuilder` to support MCP configuration
     - Add `with_mcp_port(port)`, `with_mcp_tools(tools)`, `with_mcp_resources(resources)`, `with_mcp_prompts(prompts)` methods
     - Pass MCP config to `Peer` constructor in `build()`
     - _Requirements: 9.4_
 
-  - [ ] 9.3 Update `src/a2a/__init__.py` to export new MCP classes
+  - [x] 9.3 Update `src/a2a/__init__.py` to export new MCP classes
     - Export `MCPServerHost`, `MCPClientPool`, `ZoneRegistry`, `TransportBridge`, `CapabilityCard`, `AsyncLoopRunner`, `AuthProvider`, `AuthValidator`
     - Add MCP error classes to exports
     - _Requirements: 8.1_
@@ -183,7 +183,7 @@ This plan implements the Model Context Protocol (MCP) as a structured capability
     - Verify both communication paths work within the same zone
     - _Requirements: 8.3, 8.4_
 
-- [ ] 11. Final checkpoint - Ensure all tests pass
+- [x] 11. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
