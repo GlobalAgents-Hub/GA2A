@@ -1,20 +1,25 @@
 """
-GA2A Zone Server — instância persistente do protocolo.
+GA2A Zone Server v0.4.0 — instância persistente do protocolo com descoberta LAN.
 
-Modelo de Contexto Distribuído:
+Modelo de Contexto Distribuído (agora federado pela rede local):
   - Agentes entram em zonas declarando CAPABILITIES (o que oferecem) e INTERESTS (o que buscam)
   - O servidor faz matchmaking: cruza interesses com capabilities disponíveis
   - Agentes solicitam contexto de outros agentes e absorvem a resposta
   - Cada agente é uma fonte de contexto especializado na rede
+  - NOVO: instâncias GA2A se descobrem na LAN via broadcast UDP. Agentes de outras
+    máquinas aparecem como "remote agents" e podem ser invocados via proxy.
 
 Fluxo:
-  1. agent/join      → entra na zona com capabilities + interests
-  2. agent/match     → servidor retorna quem pode atender seus interesses
+  1. agent/join      → entra na zona com capabilities + interests (broadcast na LAN)
+  2. agent/match     → servidor retorna quem pode atender seus interesses (local + remoto)
   3. agent/request   → solicita contexto de outro agente (invoca tool/resource)
   4. agent/context   → consulta todo o contexto disponível para um agente na zona
+  5. network/peers   → lista instâncias GA2A descobertas na LAN
+  6. network/agents  → lista TODOS os agentes (locais + remotos)
+  7. network/find    → busca um agente ou tool em toda a rede
 
 Uso:
-  python3 ga2a_server.py [--port PORT]
+  python3 ga2a_server.py --port 9420 [--name my-instance] [--broadcast-port 5060]
 """
 
 import sys
@@ -37,6 +42,7 @@ from a2a.mcp.capabilities import (
 from a2a.mcp.registry import ZoneRegistry
 from a2a.mcp.loop_runner import AsyncLoopRunner
 from a2a.events import EventHandler
+from a2a.discovery import NetworkDiscovery, get_local_ip
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,23 +51,39 @@ logging.basicConfig(
 )
 log = logging.getLogger('ga2a')
 
+VERSION = "0.4.0"
+
 
 class GA2AServer:
-    """Servidor GA2A com zonas, matchmaking de interesses e contexto distribuído."""
+    """Servidor GA2A com zonas, matchmaking, contexto distribuído e descoberta LAN."""
 
-    def __init__(self, port: int):
-        self.port = port
+    def __init__(self, my_port: int, instance_name: str = None, broadcast_port: int = 5060):
+        self.port = my_port
+        self.my_port = my_port
+        self.my_host = get_local_ip()
+        self.instance_name = instance_name or f"ga2a-{self.my_host}-{my_port}"
+
         self.event_handler = EventHandler()
         self.zones: dict[str, ZoneRegistry] = {}
         self.loop_runner = AsyncLoopRunner()
         self._running = False
         self._server = None
 
-        # Estado dos agentes: agent_name -> AgentState
+        # Estado dos agentes locais: agent_name -> AgentState
         self._agents: dict[str, dict] = {}
 
-        # Histórico de contexto trocado: lista de {from, to, zone, context, timestamp}
+        # Agentes remotos descobertos em outras instâncias da LAN:
+        #   agent_name -> {role, tools, interests, zones, peer_endpoint, peer_instance, peer_host}
+        self._remote_agents: dict[str, dict] = {}
+
+        # Histórico de contexto trocado
         self._context_log: list[dict] = []
+
+        # Descoberta de rede (LAN)
+        self.discovery = NetworkDiscovery(broadcast_port=broadcast_port)
+        self.discovery.on_peer_discovered(self._on_remote_peer_discovered)
+        self.discovery.on_peer_updated(self._on_remote_peer_updated)
+        self.discovery.on_peer_lost(self._on_remote_peer_lost)
 
         # Setup eventos
         @self.event_handler.on('capability_added')
@@ -93,31 +115,165 @@ class GA2AServer:
                 break
             time.sleep(0.1)
 
-        log.info(f"🌐 GA2A Server rodando em http://localhost:{self.port}")
-        log.info(f"   Endpoint MCP: http://localhost:{self.port}/mcp")
+        # Publicar nossa identidade e iniciar a descoberta LAN
+        self._update_discovery_identity()
+        self.discovery.start()
+
+        log.info(f"🌐 GA2A Server v{VERSION} rodando")
+        log.info(f"   Instância: {self.instance_name}")
+        log.info(f"   Host LAN:  {self.my_host}:{self.my_port}")
+        log.info(f"   Endpoint MCP: http://{self.my_host}:{self.my_port}/mcp")
+        log.info(f"   Broadcast LAN: porta {self.discovery.broadcast_port}")
         log.info(f"   Zonas: {list(self.zones.keys())}")
         log.info("")
         log.info("   Métodos:")
         log.info("   ├─ initialize         → handshake")
-        log.info("   ├─ zones/list         → listar zonas")
+        log.info("   ├─ zones/list         → listar zonas (local + remoto)")
         log.info("   ├─ zones/create       → criar zona")
         log.info("   ├─ agent/join         → entrar (capabilities + interests)")
         log.info("   ├─ agent/leave        → sair da zona")
-        log.info("   ├─ agent/match        → matchmaking de interesses")
-        log.info("   ├─ agent/discover     → ver capabilities na zona")
+        log.info("   ├─ agent/match        → matchmaking (local + remoto)")
+        log.info("   ├─ agent/discover     → ver capabilities (local + remoto)")
         log.info("   ├─ agent/request      → solicitar contexto de outro agente")
         log.info("   ├─ agent/context      → ver contexto disponível p/ mim")
-        log.info("   ├─ agent/invoke       → invocar tool (proxy MCP)")
-        log.info("   └─ agent/message      → mensagem entre agentes")
+        log.info("   ├─ agent/invoke       → invocar tool (proxy MCP local ou remoto)")
+        log.info("   ├─ agent/message      → mensagem entre agentes")
+        log.info("   ├─ network/peers      → instâncias GA2A na LAN")
+        log.info("   ├─ network/agents     → todos os agentes (local + remoto)")
+        log.info("   └─ network/find       → buscar agente/tool na rede")
         log.info("")
 
     def stop(self):
         self._running = False
+        try:
+            self.discovery.stop()
+        except Exception:
+            pass
         if self._server:
             self._server.should_exit = True
         time.sleep(0.5)
         self.loop_runner.stop()
         log.info("🛑 Server parado")
+
+    # ─── Descoberta LAN ─────────────────────────────────────────
+
+    def _update_discovery_identity(self):
+        """Reconstrói a identidade broadcast a partir das zonas locais."""
+        agents_by_zone: dict[str, list[str]] = {}
+        agent_details: dict[str, dict] = {}
+
+        for zname, zreg in self.zones.items():
+            names = []
+            for card in zreg.get_all_cards():
+                names.append(card.agent_name)
+                state = self._agents.get(card.agent_name, {})
+                agent_details[card.agent_name] = {
+                    "role": card.agent_role,
+                    "tools": [t.name for t in card.tools],
+                    "interests": state.get("interests", []),
+                    "zone": zname,
+                    "endpoint": card.endpoint,
+                }
+            if names:
+                agents_by_zone[zname] = names
+
+        active_zones = [z for z, reg in self.zones.items() if reg.agent_count > 0]
+
+        self.discovery.set_identity(
+            instance_id=self.instance_name,
+            host=self.my_host,
+            port=self.my_port,
+            zones=active_zones,
+            agents=agents_by_zone,
+            agent_details=agent_details,
+        )
+
+    def _on_remote_peer_discovered(self, peer: dict):
+        """Novo peer descoberto: registrar seus agentes como remotos."""
+        self._index_remote_peer(peer)
+        log.info(
+            f"🟢 Instância LAN descoberta: {peer.get('instance_id')} "
+            f"@ {peer.get('mcp_endpoint')} "
+            f"({sum(len(v) for v in peer.get('agents', {}).values())} agentes)"
+        )
+
+    def _on_remote_peer_updated(self, peer: dict):
+        """Peer atualizou seu estado: re-indexar seus agentes."""
+        self._index_remote_peer(peer)
+
+    def _on_remote_peer_lost(self, peer: dict):
+        """Peer perdido (timeout): remover todos os seus agentes remotos."""
+        instance_id = peer.get("instance_id", "")
+        removed = [
+            name for name, info in list(self._remote_agents.items())
+            if info.get("peer_instance") == instance_id
+        ]
+        for name in removed:
+            self._remote_agents.pop(name, None)
+        if removed:
+            log.info(f"🔴 Instância LAN perdida: {instance_id} (removidos {len(removed)} agentes remotos)")
+
+    def _index_remote_peer(self, peer: dict):
+        """Reconstrói as entradas de _remote_agents para um peer."""
+        instance_id = peer.get("instance_id", "")
+        endpoint = peer.get("mcp_endpoint", "")
+        host = peer.get("host", "")
+
+        # Remover entradas antigas desse peer antes de re-indexar
+        for name, info in list(self._remote_agents.items()):
+            if info.get("peer_instance") == instance_id:
+                self._remote_agents.pop(name, None)
+
+        details = peer.get("agent_details", {})
+        agents_by_zone = peer.get("agents", {})
+
+        # Mapa reverso agent -> zone (a partir de agents_by_zone)
+        agent_zone: dict[str, str] = {}
+        for zone, names in agents_by_zone.items():
+            for name in names:
+                agent_zone[name] = zone
+
+        # Preferir detalhes completos quando disponíveis
+        for name, info in details.items():
+            self._remote_agents[name] = {
+                "role": info.get("role", ""),
+                "tools": info.get("tools", []),
+                "interests": info.get("interests", []),
+                "zone": info.get("zone", agent_zone.get(name, "")),
+                "peer_endpoint": endpoint,
+                "peer_instance": instance_id,
+                "peer_host": host,
+            }
+
+        # Fallback: agentes listados sem detalhes
+        for name, zone in agent_zone.items():
+            if name not in self._remote_agents:
+                self._remote_agents[name] = {
+                    "role": "",
+                    "tools": [],
+                    "interests": [],
+                    "zone": zone,
+                    "peer_endpoint": endpoint,
+                    "peer_instance": instance_id,
+                    "peer_host": host,
+                }
+
+    async def _proxy_to_remote(self, endpoint: str, method: str, params: dict) -> dict:
+        """Encaminha uma chamada JSON-RPC para a instância remota."""
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(endpoint, json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": method,
+                    "params": params,
+                })
+                data = resp.json()
+                if "result" in data:
+                    return {"status": "ok", "result": data["result"]}
+                return {"status": "error", "error": data.get("error", {})}
+        except Exception as e:
+            return {"status": "error", "error": str(e), "fallback": "peer_unreachable"}
 
     def _create_app(self):
         server = self
@@ -142,16 +298,21 @@ class GA2AServer:
             if method == "GET" and path == "/":
                 await _send(send, 200, json.dumps({
                     "service": "GA2A Protocol Server",
-                    "version": "0.3.0",
-                    "model": "distributed-context-via-zones",
-                    "mcp_endpoint": f"http://localhost:{server.port}/mcp",
+                    "version": VERSION,
+                    "model": "distributed-context-via-zones + LAN federation",
+                    "instance": server.instance_name,
+                    "host": server.my_host,
+                    "port": server.my_port,
+                    "mcp_endpoint": f"http://{server.my_host}:{server.my_port}/mcp",
                     "zones": list(server.zones.keys()),
-                    "agents_online": len(server._agents),
+                    "local_agents": len(server._agents),
+                    "remote_agents": len(server._remote_agents),
+                    "lan_peers": len(server.discovery.get_peers()),
                     "status": "running"
                 }, indent=2).encode())
 
             elif method == "GET" and path == "/status":
-                await _send(send, 200, json.dumps(server._get_status(), indent=2).encode())
+                await _send(send, 200, json.dumps(server._get_full_status(), indent=2).encode())
 
             elif method == "POST" and path == "/mcp":
                 await server._handle_mcp(scope, receive, send)
@@ -161,8 +322,9 @@ class GA2AServer:
 
         return app
 
-    def _get_status(self):
-        status = {}
+    def _get_full_status(self):
+        # Zonas locais
+        local_zones = {}
         for zname, zreg in self.zones.items():
             cards = zreg.get_all_cards()
             members = []
@@ -175,8 +337,45 @@ class GA2AServer:
                     "interests": agent_state.get("interests", []),
                     "endpoint": c.endpoint,
                 })
-            status[zname] = {"agents": zreg.agent_count, "members": members}
-        return status
+            local_zones[zname] = {"agents": zreg.agent_count, "members": members}
+
+        # Agentes remotos agrupados por instância
+        remote_by_instance: dict[str, dict] = {}
+        for name, info in self._remote_agents.items():
+            inst = info.get("peer_instance", "unknown")
+            entry = remote_by_instance.setdefault(inst, {
+                "peer_endpoint": info.get("peer_endpoint", ""),
+                "peer_host": info.get("peer_host", ""),
+                "agents": [],
+            })
+            entry["agents"].append({
+                "name": name,
+                "role": info.get("role", ""),
+                "tools": info.get("tools", []),
+                "zone": info.get("zone", ""),
+            })
+
+        # Peers LAN
+        lan_peers = []
+        for pid, peer in self.discovery.get_peers().items():
+            lan_peers.append({
+                "instance": pid,
+                "host": peer.get("host", ""),
+                "port": peer.get("port", 0),
+                "mcp_endpoint": peer.get("mcp_endpoint", ""),
+                "zones": peer.get("zones", []),
+                "agent_count": sum(len(v) for v in peer.get("agents", {}).values()),
+            })
+
+        return {
+            "instance": self.instance_name,
+            "host": self.my_host,
+            "port": self.my_port,
+            "version": VERSION,
+            "local_zones": local_zones,
+            "remote_agents": remote_by_instance,
+            "lan_peers": lan_peers,
+        }
 
     async def _handle_mcp(self, scope, receive, send):
         body = b""
@@ -208,6 +407,10 @@ class GA2AServer:
             "agent/context": self._h_agent_context,
             "agent/invoke": self._h_agent_invoke,
             "agent/message": self._h_agent_message,
+            # network (v0.4.0)
+            "network/peers": self._h_network_peers,
+            "network/agents": self._h_network_agents,
+            "network/find": self._h_network_find,
             # aliases
             "zones/join": self._h_agent_join,
             "agent/register": self._h_agent_join,
@@ -225,19 +428,41 @@ class GA2AServer:
     async def _h_initialize(self, params):
         return {
             "protocolVersion": "2024-11-05",
-            "serverInfo": {"name": "GA2A-Server", "version": "0.3.0"},
-            "model": "distributed-context",
-            "capabilities": {"zones": True, "matchmaking": True, "contextSharing": True},
+            "serverInfo": {"name": "GA2A-Server", "version": VERSION},
+            "model": "distributed-context + LAN federation",
+            "instance": self.instance_name,
+            "host": self.my_host,
+            "capabilities": {
+                "zones": True, "matchmaking": True, "contextSharing": True,
+                "lanDiscovery": True, "remoteProxy": True,
+            },
             "zones": list(self.zones.keys()),
         }
 
     async def _h_zones_list(self, params):
+        """Zonas locais + zonas dos peers remotos."""
         result = {}
         for zname, zreg in self.zones.items():
             result[zname] = {
                 "agent_count": zreg.agent_count,
-                "agents": [c.agent_name for c in zreg.get_all_cards()]
+                "agents": [c.agent_name for c in zreg.get_all_cards()],
+                "source": "local",
             }
+
+        # Agregar zonas remotas
+        for pid, peer in self.discovery.get_peers().items():
+            for zname, names in peer.get("agents", {}).items():
+                entry = result.setdefault(zname, {
+                    "agent_count": 0, "agents": [], "source": "remote",
+                })
+                # Não duplicar contagem local; marcar como misto se já existia
+                if entry.get("source") == "local":
+                    entry["source"] = "mixed"
+                entry.setdefault("remote_agents", [])
+                for n in names:
+                    entry["remote_agents"].append({"agent": n, "instance": pid})
+                entry["agent_count"] = entry.get("agent_count", 0) + len(names)
+
         return {"zones": result}
 
     async def _h_zones_create(self, params):
@@ -255,6 +480,7 @@ class GA2AServer:
         Agente entra na zona declarando:
           - capabilities: tools que oferece (o que eu sei fazer)
           - interests: o que busca (o que eu preciso de contexto)
+        Após o registro, a identidade é rebroadcast na LAN.
         """
         zone_name = params.get("zone", "General")
         agent_name = params.get("agent_name", "")
@@ -267,13 +493,11 @@ class GA2AServer:
         if not agent_name:
             return {"error": "agent_name is required"}
 
-        # Criar zona se não existir
         if zone_name not in self.zones:
             self.zones[zone_name] = ZoneRegistry(zone_name, self.event_handler)
 
         zreg = self.zones[zone_name]
 
-        # Construir card de capabilities
         tool_descriptors = [
             ToolDescriptor(name=t["name"], description=t.get("description", ""),
                           input_schema=t.get("input_schema", {}))
@@ -295,7 +519,6 @@ class GA2AServer:
         )
         zreg.register(card)
 
-        # Guardar estado do agente (com interesses)
         self._agents[agent_name] = {
             "zone": zone_name,
             "role": agent_role,
@@ -305,7 +528,9 @@ class GA2AServer:
             "joined_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        # Fazer match automático se tem interesses
+        # Rebroadcast na LAN: o novo agente passa a ser visível para outras instâncias
+        self._update_discovery_identity()
+
         matches = []
         if interests:
             matches = self._find_matches(zone_name, agent_name, interests)
@@ -319,7 +544,7 @@ class GA2AServer:
             "zone": zone_name,
             "agent": agent_name,
             "peers": peers,
-            "matches": matches,  # agentes que podem atender seus interesses
+            "matches": matches,
         }
 
     async def _h_agent_leave(self, params):
@@ -329,18 +554,20 @@ class GA2AServer:
         if zreg:
             zreg.deregister(agent_name)
         self._agents.pop(agent_name, None)
+
+        # Rebroadcast na LAN após remover o agente
+        self._update_discovery_identity()
+
         return {"status": "left", "zone": zone_name, "agent": agent_name}
 
     async def _h_agent_match(self, params):
         """
-        Busca agentes que podem atender os interesses declarados.
-        Se não passar interests, usa os que foram declarados no join.
+        Busca agentes (locais + remotos) que atendem os interesses declarados.
         """
         zone_name = params.get("zone", "General")
         agent_name = params.get("agent_name", "")
         interests = params.get("interests", None)
 
-        # Se não passou interests, usar os do registro
         if interests is None:
             agent_state = self._agents.get(agent_name, {})
             interests = agent_state.get("interests", [])
@@ -349,88 +576,127 @@ class GA2AServer:
             return {"matches": [], "note": "No interests declared. Use 'interests' param or declare on join."}
 
         matches = self._find_matches(zone_name, agent_name, interests)
+        remote_matches = self._find_remote_matches(agent_name, interests, zone_name)
+
         return {
             "zone": zone_name,
             "agent": agent_name,
             "interests": interests,
             "matches": matches,
+            "remote_matches": remote_matches,
         }
 
     async def _h_agent_discover(self, params):
         zone_name = params.get("zone", "General")
         tool_filter = params.get("tool", None)
+        include_remote = params.get("include_remote", True)
+
         zreg = self.zones.get(zone_name)
         if not zreg:
             return {"error": f"Zone '{zone_name}' not found"}
 
         cards = zreg.find_by_tool(tool_filter) if tool_filter else zreg.get_all_cards()
+        capabilities = [
+            {
+                "agent": c.agent_name,
+                "role": c.agent_role,
+                "endpoint": c.endpoint,
+                "tools": [{"name": t.name, "description": t.description,
+                          "input_schema": t.input_schema} for t in c.tools],
+                "interests": self._agents.get(c.agent_name, {}).get("interests", []),
+                "source": "local",
+            }
+            for c in cards
+        ]
+
+        remote_capabilities = []
+        if include_remote:
+            for name, info in self._remote_agents.items():
+                if zone_name and info.get("zone") and info.get("zone") != zone_name:
+                    continue
+                if tool_filter and tool_filter not in info.get("tools", []):
+                    continue
+                remote_capabilities.append({
+                    "agent": name,
+                    "role": info.get("role", ""),
+                    "endpoint": info.get("peer_endpoint", ""),
+                    "tools": [{"name": t, "description": "", "input_schema": {}}
+                              for t in info.get("tools", [])],
+                    "interests": info.get("interests", []),
+                    "source": "remote",
+                    "peer_instance": info.get("peer_instance", ""),
+                    "peer_host": info.get("peer_host", ""),
+                })
+
         return {
             "zone": zone_name,
-            "capabilities": [
-                {
-                    "agent": c.agent_name,
-                    "role": c.agent_role,
-                    "endpoint": c.endpoint,
-                    "tools": [{"name": t.name, "description": t.description,
-                              "input_schema": t.input_schema} for t in c.tools],
-                    "interests": self._agents.get(c.agent_name, {}).get("interests", []),
-                }
-                for c in cards
-            ]
+            "capabilities": capabilities,
+            "remote_capabilities": remote_capabilities,
         }
 
     async def _h_agent_request(self, params):
         """
-        Agente solicita contexto de outro agente.
-        Se o target tem endpoint MCP, proxy a chamada.
-        Senão, retorna a capability card como contexto disponível.
+        Agente solicita contexto de outro agente (local ou remoto).
+        Remoto: proxy da chamada para a instância que hospeda o agente.
         """
         from_agent = params.get("from", "")
         target_agent = params.get("target", "")
         zone_name = params.get("zone", "General")
-        interest = params.get("interest", "")  # qual interesse está buscando
-        tool_name = params.get("tool", "")     # tool específica pra invocar
+        interest = params.get("interest", "")
+        tool_name = params.get("tool", "")
         arguments = params.get("arguments", {})
 
         zreg = self.zones.get(zone_name)
-        if not zreg:
-            return {"error": f"Zone '{zone_name}' not found"}
+        card = zreg.get_card(target_agent) if zreg else None
 
-        card = zreg.get_card(target_agent)
-        if not card:
-            return {"error": f"Agent '{target_agent}' not found in zone '{zone_name}'"}
-
-        # Se tem endpoint e tool, tentar invocar via proxy MCP
-        if card.endpoint and tool_name:
-            try:
-                import httpx
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(card.endpoint, json={
-                        "jsonrpc": "2.0", "id": 1,
-                        "method": "tools/call",
-                        "params": {"name": tool_name, "arguments": arguments}
-                    })
-                    data = resp.json()
-                    context_data = data.get("result", data.get("error", {}))
-            except Exception as e:
-                context_data = {"error": str(e), "fallback": "endpoint_unreachable"}
+        if card:
+            # Agente local
+            if card.endpoint and tool_name:
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        resp = await client.post(card.endpoint, json={
+                            "jsonrpc": "2.0", "id": 1,
+                            "method": "tools/call",
+                            "params": {"name": tool_name, "arguments": arguments}
+                        })
+                        data = resp.json()
+                        context_data = data.get("result", data.get("error", {}))
+                except Exception as e:
+                    context_data = {"error": str(e), "fallback": "endpoint_unreachable"}
+            else:
+                context_data = {
+                    "agent": target_agent,
+                    "role": card.agent_role,
+                    "available_tools": [
+                        {"name": t.name, "description": t.description}
+                        for t in card.tools
+                    ],
+                    "available_resources": [
+                        {"uri": r.uri, "name": r.name, "description": r.description}
+                        for r in card.resources
+                    ],
+                    "note": "Agent has no live endpoint. Context is its capability declaration."
+                }
+        elif target_agent in self._remote_agents:
+            # Agente remoto: proxy do request para a instância dona
+            info = self._remote_agents[target_agent]
+            endpoint = info.get("peer_endpoint", "")
+            proxied = await self._proxy_to_remote(endpoint, "agent/request", {
+                "from": from_agent,
+                "target": target_agent,
+                "zone": info.get("zone", zone_name),
+                "interest": interest,
+                "tool": tool_name,
+                "arguments": arguments,
+            })
+            if proxied.get("status") == "ok":
+                context_data = proxied["result"].get("context", proxied["result"])
+            else:
+                context_data = {"error": proxied.get("error"), "source": "remote_proxy"}
         else:
-            # Retorna o contexto estático: o que esse agente oferece
-            context_data = {
-                "agent": target_agent,
-                "role": card.agent_role,
-                "available_tools": [
-                    {"name": t.name, "description": t.description}
-                    for t in card.tools
-                ],
-                "available_resources": [
-                    {"uri": r.uri, "name": r.name, "description": r.description}
-                    for r in card.resources
-                ],
-                "note": "Agent has no live endpoint. Context is its capability declaration."
-            }
+            return {"error": f"Agent '{target_agent}' not found (local zone '{zone_name}' or remote)"}
 
-        # Registrar troca de contexto
         exchange = {
             "from": from_agent,
             "target": target_agent,
@@ -467,7 +733,6 @@ class GA2AServer:
         if not zreg:
             return {"error": f"Zone '{zone_name}' not found"}
 
-        # Contexto disponível na zona
         available = []
         for card in zreg.get_all_cards():
             if card.agent_name != agent_name:
@@ -478,14 +743,12 @@ class GA2AServer:
                     "match_score": self._calc_match_score(interests, card),
                 })
 
-        # Ordenar por relevância (match_score)
         available.sort(key=lambda x: x["match_score"], reverse=True)
 
-        # Histórico de contexto recebido
         history = [
             e for e in self._context_log
             if e["from"] == agent_name or e["target"] == agent_name
-        ][-10:]  # últimos 10
+        ][-10:]
 
         return {
             "agent": agent_name,
@@ -496,38 +759,51 @@ class GA2AServer:
         }
 
     async def _h_agent_invoke(self, params):
-        """Proxy: invoca tool de outro agente via endpoint MCP."""
+        """
+        Proxy: invoca tool de outro agente.
+        - Agente local: invoca diretamente o endpoint MCP do agente.
+        - Agente remoto: encaminha 'agent/invoke' para a instância dona,
+          que resolve localmente contra o endpoint do agente.
+        """
         target = params.get("target_agent", params.get("target", ""))
         tool_name = params.get("tool", "")
         arguments = params.get("arguments", {})
         zone_name = params.get("zone", "General")
 
         zreg = self.zones.get(zone_name)
-        if not zreg:
-            return {"error": f"Zone '{zone_name}' not found"}
+        card = zreg.get_card(target) if zreg else None
 
-        card = zreg.get_card(target)
-        if not card:
-            return {"error": f"Agent '{target}' not found in zone '{zone_name}'"}
-
-        if not card.endpoint:
-            return {"error": f"Agent '{target}' has no live endpoint for invocation"}
-
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(card.endpoint, json={
-                    "jsonrpc": "2.0", "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": tool_name, "arguments": arguments}
-                })
-                data = resp.json()
-                if "result" in data:
-                    return {"status": "ok", "result": data["result"]}
-                else:
+        if card:
+            if not card.endpoint:
+                return {"error": f"Agent '{target}' has no live endpoint for invocation"}
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(card.endpoint, json={
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": tool_name, "arguments": arguments}
+                    })
+                    data = resp.json()
+                    if "result" in data:
+                        return {"status": "ok", "result": data["result"]}
                     return {"status": "error", "error": data.get("error", {})}
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+
+        # Agente remoto: proxy do invoke para a instância dona
+        if target in self._remote_agents:
+            info = self._remote_agents[target]
+            endpoint = info.get("peer_endpoint", "")
+            log.info(f"🛰️  Proxy invoke '{target}.{tool_name}' → {info.get('peer_instance')} ({endpoint})")
+            return await self._proxy_to_remote(endpoint, "agent/invoke", {
+                "target_agent": target,
+                "tool": tool_name,
+                "arguments": arguments,
+                "zone": info.get("zone", zone_name),
+            })
+
+        return {"error": f"Agent '{target}' not found (local zone '{zone_name}' or remote)"}
 
     async def _h_agent_message(self, params):
         from_agent = params.get("from", "anonymous")
@@ -543,10 +819,142 @@ class GA2AServer:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
+    # ─── Network (v0.4.0) ───────────────────────────────────────
+
+    async def _h_network_peers(self, params):
+        """Lista todas as instâncias GA2A descobertas na LAN."""
+        peers = []
+        for pid, peer in self.discovery.get_peers().items():
+            peers.append({
+                "instance": pid,
+                "host": peer.get("host", ""),
+                "port": peer.get("port", 0),
+                "mcp_endpoint": peer.get("mcp_endpoint", ""),
+                "zones": peer.get("zones", []),
+                "agent_count": sum(len(v) for v in peer.get("agents", {}).values()),
+                "last_seen": peer.get("timestamp", 0),
+            })
+        return {
+            "self": {
+                "instance": self.instance_name,
+                "host": self.my_host,
+                "port": self.my_port,
+                "mcp_endpoint": f"http://{self.my_host}:{self.my_port}/mcp",
+            },
+            "peers": peers,
+            "peer_count": len(peers),
+        }
+
+    async def _h_network_agents(self, params):
+        """Lista TODOS os agentes: locais + remotos (de outras máquinas)."""
+        local = []
+        for name, state in self._agents.items():
+            local.append({
+                "agent": name,
+                "role": state.get("role", ""),
+                "zone": state.get("zone", ""),
+                "tools": state.get("tools", []),
+                "interests": state.get("interests", []),
+                "source": "local",
+                "instance": self.instance_name,
+            })
+
+        remote = []
+        for name, info in self._remote_agents.items():
+            remote.append({
+                "agent": name,
+                "role": info.get("role", ""),
+                "zone": info.get("zone", ""),
+                "tools": info.get("tools", []),
+                "interests": info.get("interests", []),
+                "source": "remote",
+                "instance": info.get("peer_instance", ""),
+                "peer_endpoint": info.get("peer_endpoint", ""),
+                "peer_host": info.get("peer_host", ""),
+            })
+
+        return {
+            "local_agents": local,
+            "remote_agents": remote,
+            "total": len(local) + len(remote),
+        }
+
+    async def _h_network_find(self, params):
+        """
+        Busca um agente específico ou uma tool em toda a rede (local + remoto).
+        Params:
+          - agent: nome do agente a procurar
+          - tool:  nome da tool a procurar
+        """
+        agent_query = params.get("agent", "")
+        tool_query = params.get("tool", "")
+
+        found = []
+
+        if agent_query:
+            # Busca local
+            for zname, zreg in self.zones.items():
+                card = zreg.get_card(agent_query)
+                if card:
+                    found.append({
+                        "agent": agent_query,
+                        "role": card.agent_role,
+                        "zone": zname,
+                        "tools": [t.name for t in card.tools],
+                        "source": "local",
+                        "instance": self.instance_name,
+                        "endpoint": card.endpoint,
+                    })
+            # Busca remota
+            if agent_query in self._remote_agents:
+                info = self._remote_agents[agent_query]
+                found.append({
+                    "agent": agent_query,
+                    "role": info.get("role", ""),
+                    "zone": info.get("zone", ""),
+                    "tools": info.get("tools", []),
+                    "source": "remote",
+                    "instance": info.get("peer_instance", ""),
+                    "peer_endpoint": info.get("peer_endpoint", ""),
+                })
+
+        if tool_query:
+            # Local: qualquer agente que ofereça a tool
+            for zname, zreg in self.zones.items():
+                for card in zreg.get_all_cards():
+                    if any(t.name == tool_query for t in card.tools):
+                        found.append({
+                            "agent": card.agent_name,
+                            "role": card.agent_role,
+                            "zone": zname,
+                            "tool": tool_query,
+                            "source": "local",
+                            "instance": self.instance_name,
+                            "endpoint": card.endpoint,
+                        })
+            # Remoto
+            for name, info in self._remote_agents.items():
+                if tool_query in info.get("tools", []):
+                    found.append({
+                        "agent": name,
+                        "role": info.get("role", ""),
+                        "zone": info.get("zone", ""),
+                        "tool": tool_query,
+                        "source": "remote",
+                        "instance": info.get("peer_instance", ""),
+                        "peer_endpoint": info.get("peer_endpoint", ""),
+                    })
+
+        return {
+            "query": {"agent": agent_query, "tool": tool_query},
+            "results": found,
+            "count": len(found),
+        }
+
     # ─── Matchmaking ────────────────────────────────────────────
 
     def _find_matches(self, zone_name: str, requester: str, interests: list[str]) -> list[dict]:
-        """Encontra agentes cujas capabilities atendem os interesses."""
+        """Encontra agentes locais cujas capabilities atendem os interesses."""
         zreg = self.zones.get(zone_name)
         if not zreg:
             return []
@@ -571,6 +979,40 @@ class GA2AServer:
                     "score": score,
                     "matching_tools": matching_tools,
                     "endpoint": card.endpoint,
+                    "source": "local",
+                })
+
+        matches.sort(key=lambda x: x["score"], reverse=True)
+        return matches
+
+    def _find_remote_matches(self, requester: str, interests: list[str], zone_name: str = None) -> list[dict]:
+        """Encontra agentes remotos cujas capabilities/role atendem os interesses."""
+        matches = []
+        for name, info in self._remote_agents.items():
+            if name == requester:
+                continue
+
+            searchable = " ".join([
+                " ".join(info.get("tools", [])),
+                info.get("role", ""),
+                " ".join(info.get("interests", [])),
+            ]).lower()
+
+            score = sum(1 for i in interests if i.lower() in searchable)
+            if score > 0:
+                matching_tools = [
+                    t for t in info.get("tools", [])
+                    if any(i.lower() in t.lower() for i in interests)
+                ]
+                matches.append({
+                    "agent": name,
+                    "role": info.get("role", ""),
+                    "score": score,
+                    "matching_tools": matching_tools,
+                    "peer_endpoint": info.get("peer_endpoint", ""),
+                    "peer_instance": info.get("peer_instance", ""),
+                    "zone": info.get("zone", ""),
+                    "source": "remote",
                 })
 
         matches.sort(key=lambda x: x["score"], reverse=True)
@@ -612,8 +1054,10 @@ async def _send(send_fn, status, body, content_type="application/json"):
 # ─── Main ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="GA2A Zone Server")
-    parser.add_argument("--port", type=int, default=0, help="Port (0=auto)")
+    parser = argparse.ArgumentParser(description="GA2A Zone Server v0.4.0 (LAN discovery)")
+    parser.add_argument("--port", type=int, default=0, help="MCP port (0=auto)")
+    parser.add_argument("--name", type=str, default=None, help="Instance name (default: ga2a-<ip>-<port>)")
+    parser.add_argument("--broadcast-port", type=int, default=5060, help="UDP broadcast port for LAN discovery")
     args = parser.parse_args()
 
     if args.port == 0:
@@ -622,7 +1066,11 @@ def main():
         args.port = s.getsockname()[1]
         s.close()
 
-    server = GA2AServer(port=args.port)
+    server = GA2AServer(
+        my_port=args.port,
+        instance_name=args.name,
+        broadcast_port=args.broadcast_port,
+    )
 
     def _sig(sig, frame):
         print()
