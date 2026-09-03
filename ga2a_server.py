@@ -1,5 +1,6 @@
 """
-GA2A Zone Server v0.4.0 — instância persistente do protocolo com descoberta LAN.
+GA2A Zone Server v0.5.0 — instância persistente do protocolo com descoberta LAN,
+autorização por consentimento e descoberta unicast/gossip (VPN / cross-subnet).
 
 Modelo de Contexto Distribuído (agora federado pela rede local):
   - Agentes entram em zonas declarando CAPABILITIES (o que oferecem) e INTERESTS (o que buscam)
@@ -20,6 +21,7 @@ Fluxo:
 
 Uso:
   python3 ga2a_server.py --port 9420 [--name my-instance] [--broadcast-port 5060]
+                         [--peer host:port ...]
 """
 
 import sys
@@ -30,7 +32,9 @@ import json
 import logging
 import signal
 import socket
+import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,6 +45,7 @@ from a2a.mcp.capabilities import (
 )
 from a2a.mcp.registry import ZoneRegistry
 from a2a.mcp.loop_runner import AsyncLoopRunner
+from a2a.mcp.grants import GrantManager, AccessRequest, AccessGrant
 from a2a.events import EventHandler
 from a2a.discovery import NetworkDiscovery, get_local_ip
 
@@ -51,13 +56,14 @@ logging.basicConfig(
 )
 log = logging.getLogger('ga2a')
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 
 class GA2AServer:
     """Servidor GA2A com zonas, matchmaking, contexto distribuído e descoberta LAN."""
 
-    def __init__(self, my_port: int, instance_name: str = None, broadcast_port: int = 5060):
+    def __init__(self, my_port: int, instance_name: str = None, broadcast_port: int = 5060,
+                 seed_peers: list[str] = None):
         self.port = my_port
         self.my_port = my_port
         self.my_host = get_local_ip()
@@ -71,6 +77,18 @@ class GA2AServer:
 
         # Estado dos agentes locais: agent_name -> AgentState
         self._agents: dict[str, dict] = {}
+
+        # ─── Autorização por consentimento (v0.5.0) ───
+        # Segredo server-wide usado para assinar grants de todos os agentes locais.
+        self._grant_secret = uuid.uuid4().hex
+        # Registro de GrantManagers por agente local dono: agent_name -> GrantManager
+        self._grant_managers: dict[str, GrantManager] = {}
+
+        # ─── Descoberta unicast/gossip (v0.5.0) ───
+        # Seed peers passados via --peer ("host:port")
+        self._seed_peers: list[str] = list(seed_peers or [])
+        # Thread de re-contato periódico dos seeds
+        self._gossip_thread: threading.Thread = None
 
         # Agentes remotos descobertos em outras instâncias da LAN:
         #   agent_name -> {role, tools, interests, zones, peer_endpoint, peer_instance, peer_host}
@@ -98,6 +116,16 @@ class GA2AServer:
         for zone_name in ['General', 'AI-Research', 'DevOps', 'Data-Science']:
             self.zones[zone_name] = ZoneRegistry(zone_name, self.event_handler)
 
+    # ─── Autorização por consentimento ──────────────────────────
+
+    def _get_grant_manager(self, agent_name: str) -> GrantManager:
+        """Retorna (criando se necessário) o GrantManager de um agente local."""
+        mgr = self._grant_managers.get(agent_name)
+        if mgr is None:
+            mgr = GrantManager(agent_name, self._grant_secret)
+            self._grant_managers[agent_name] = mgr
+        return mgr
+
     def start(self):
         self.loop_runner.start()
         self._running = True
@@ -119,27 +147,40 @@ class GA2AServer:
         self._update_discovery_identity()
         self.discovery.start()
 
+        # Semear a partir dos peers unicast (VPN / cross-subnet) e iniciar o gossip
+        self._seed_unicast_peers()
+        self._start_gossip_loop()
+
         log.info(f"🌐 GA2A Server v{VERSION} rodando")
         log.info(f"   Instância: {self.instance_name}")
         log.info(f"   Host LAN:  {self.my_host}:{self.my_port}")
         log.info(f"   Endpoint MCP: http://{self.my_host}:{self.my_port}/mcp")
         log.info(f"   Broadcast LAN: porta {self.discovery.broadcast_port}")
+        if self._seed_peers:
+            log.info(f"   Seed peers (unicast): {self._seed_peers}")
         log.info(f"   Zonas: {list(self.zones.keys())}")
         log.info("")
         log.info("   Métodos:")
         log.info("   ├─ initialize         → handshake")
         log.info("   ├─ zones/list         → listar zonas (local + remoto)")
         log.info("   ├─ zones/create       → criar zona")
-        log.info("   ├─ agent/join         → entrar (capabilities + interests)")
+        log.info("   ├─ agent/join         → entrar (capabilities + interests + auto_approve)")
         log.info("   ├─ agent/leave        → sair da zona")
         log.info("   ├─ agent/match        → matchmaking (local + remoto)")
         log.info("   ├─ agent/discover     → ver capabilities (local + remoto)")
         log.info("   ├─ agent/request      → solicitar contexto de outro agente")
         log.info("   ├─ agent/context      → ver contexto disponível p/ mim")
-        log.info("   ├─ agent/invoke       → invocar tool (proxy MCP local ou remoto)")
+        log.info("   ├─ agent/invoke       → invocar tool (requer grant p/ agentes locais)")
         log.info("   ├─ agent/message      → mensagem entre agentes")
-        log.info("   ├─ network/peers      → instâncias GA2A na LAN")
+        log.info("   ├─ access/request     → pedir autorização de interação (consent)")
+        log.info("   ├─ access/pending     → listar pedidos pendentes (dono)")
+        log.info("   ├─ access/approve     → aprovar pedido → emite grant")
+        log.info("   ├─ access/deny        → negar pedido")
+        log.info("   ├─ access/revoke      → revogar um grant")
+        log.info("   ├─ access/grants      → listar grants emitidos")
+        log.info("   ├─ network/peers      → instâncias GA2A na rede")
         log.info("   ├─ network/agents     → todos os agentes (local + remoto)")
+        log.info("   ├─ network/hello      → handshake unicast + gossip (VPN)")
         log.info("   └─ network/find       → buscar agente/tool na rede")
         log.info("")
 
@@ -275,6 +316,118 @@ class GA2AServer:
         except Exception as e:
             return {"status": "error", "error": str(e), "fallback": "peer_unreachable"}
 
+    # ─── Descoberta unicast + gossip (v0.5.0) ───────────────────
+
+    def _self_identity(self) -> dict:
+        """Constrói o dict de identidade deste servidor para o handshake unicast."""
+        agents_by_zone: dict[str, list[str]] = {}
+        agent_details: dict[str, dict] = {}
+        for zname, zreg in self.zones.items():
+            names = []
+            for card in zreg.get_all_cards():
+                names.append(card.agent_name)
+                state = self._agents.get(card.agent_name, {})
+                agent_details[card.agent_name] = {
+                    "role": card.agent_role,
+                    "tools": [t.name for t in card.tools],
+                    "interests": state.get("interests", []),
+                    "zone": zname,
+                    "endpoint": card.endpoint,
+                }
+            if names:
+                agents_by_zone[zname] = names
+
+        active_zones = [z for z, reg in self.zones.items() if reg.agent_count > 0]
+        return {
+            "instance_id": self.instance_name,
+            "host": self.my_host,
+            "port": self.my_port,
+            "mcp_endpoint": f"http://{self.my_host}:{self.my_port}/mcp",
+            "zones": active_zones,
+            "agents": agents_by_zone,
+            "agent_details": agent_details,
+        }
+
+    def _known_peer_identities(self) -> list[dict]:
+        """Lista de identidades dos peers conhecidos (para gossip)."""
+        out = []
+        for pid, peer in self.discovery.get_peers().items():
+            out.append({
+                "instance_id": pid,
+                "host": peer.get("host", ""),
+                "port": peer.get("port", 0),
+                "mcp_endpoint": peer.get("mcp_endpoint", ""),
+                "zones": peer.get("zones", []),
+                "agents": peer.get("agents", {}),
+                "agent_details": peer.get("agent_details", {}),
+            })
+        return out
+
+    def _learn_peer(self, peer: dict):
+        """Registra um peer aprendido via unicast/gossip (ignora a si mesmo)."""
+        if not peer or not peer.get("instance_id"):
+            return
+        if peer.get("instance_id") == self.instance_name:
+            return
+        try:
+            self.discovery.register_unicast_peer(peer)
+        except Exception as e:
+            log.debug(f"Falha ao registrar peer unicast: {e}")
+
+    def _hello_seed(self, address: str):
+        """Envia network/hello a um seed 'host:port' e aprende sua malha (gossip)."""
+        addr = address.strip()
+        if not addr:
+            return
+        if "://" in addr:
+            endpoint = addr.rstrip("/")
+            if not endpoint.endswith("/mcp"):
+                endpoint = endpoint + "/mcp"
+        else:
+            endpoint = f"http://{addr}/mcp"
+
+        try:
+            import httpx
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.post(endpoint, json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "network/hello",
+                    "params": self._self_identity(),
+                })
+                data = resp.json()
+                result = data.get("result", {})
+            # Registrar o próprio seed (sua identidade)
+            peer_identity = result.get("identity")
+            if peer_identity:
+                self._learn_peer(peer_identity)
+            # Gossip: registrar todos os peers que o seed conhece
+            for p in result.get("known_peers", []):
+                self._learn_peer(p)
+        except Exception as e:
+            log.debug(f"Seed unicast '{address}' inacessível: {e}")
+
+    def _seed_unicast_peers(self):
+        """Contata todos os seed peers uma vez no startup."""
+        for addr in self._seed_peers:
+            self._hello_seed(addr)
+
+    def _start_gossip_loop(self):
+        """Re-contata seeds periodicamente para manter a malha viva (unicast)."""
+        if not self._seed_peers:
+            return
+
+        def _loop():
+            interval = max(self.discovery.broadcast_interval * 2, 1)
+            while self._running:
+                time.sleep(interval)
+                if not self._running:
+                    break
+                for addr in list(self._seed_peers):
+                    self._hello_seed(addr)
+
+        self._gossip_thread = threading.Thread(target=_loop, daemon=True)
+        self._gossip_thread.start()
+
     def _create_app(self):
         server = self
 
@@ -407,10 +560,19 @@ class GA2AServer:
             "agent/context": self._h_agent_context,
             "agent/invoke": self._h_agent_invoke,
             "agent/message": self._h_agent_message,
+            # access / consent (v0.5.0)
+            "access/request": self._h_access_request,
+            "access/pending": self._h_access_pending,
+            "access/approve": self._h_access_approve,
+            "access/deny": self._h_access_deny,
+            "access/revoke": self._h_access_revoke,
+            "access/grants": self._h_access_grants,
             # network (v0.4.0)
             "network/peers": self._h_network_peers,
             "network/agents": self._h_network_agents,
             "network/find": self._h_network_find,
+            # network unicast/gossip (v0.5.0)
+            "network/hello": self._h_network_hello,
             # aliases
             "zones/join": self._h_agent_join,
             "agent/register": self._h_agent_join,
@@ -489,6 +651,7 @@ class GA2AServer:
         resources = params.get("resources", [])
         interests = params.get("interests", [])
         endpoint = params.get("endpoint", "")
+        auto_approve = params.get("auto_approve", None)
 
         if not agent_name:
             return {"error": "agent_name is required"}
@@ -519,12 +682,28 @@ class GA2AServer:
         )
         zreg.register(card)
 
+        # Consentimento (v0.5.0): todo agente local ganha um GrantManager.
+        # - auto_approve=True         → política vazia (aprova tudo automaticamente)
+        # - auto_approve=[{...}, ...]  → cada dict vira uma política add_policy(**dict)
+        # - ausente/False              → interações ficam pendentes até approve manual
+        mgr = self._get_grant_manager(agent_name)
+        requires_consent = True
+        if auto_approve is True:
+            mgr.add_policy()  # política vazia = aprova tudo
+            requires_consent = False
+        elif isinstance(auto_approve, list):
+            for policy in auto_approve:
+                if isinstance(policy, dict):
+                    mgr.add_policy(**policy)
+
         self._agents[agent_name] = {
             "zone": zone_name,
             "role": agent_role,
             "endpoint": endpoint,
             "tools": [t["name"] for t in tools],
             "interests": interests,
+            "auto_approve": auto_approve if auto_approve is not None else False,
+            "requires_consent": requires_consent,
             "joined_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -554,6 +733,7 @@ class GA2AServer:
         if zreg:
             zreg.deregister(agent_name)
         self._agents.pop(agent_name, None)
+        self._grant_managers.pop(agent_name, None)
 
         # Rebroadcast na LAN após remover o agente
         self._update_discovery_identity()
@@ -769,11 +949,26 @@ class GA2AServer:
         tool_name = params.get("tool", "")
         arguments = params.get("arguments", {})
         zone_name = params.get("zone", "General")
+        grant = params.get("grant", "")
 
         zreg = self.zones.get(zone_name)
         card = zreg.get_card(target) if zreg else None
 
         if card:
+            # Consentimento (v0.5.0): agentes locais com GrantManager exigem grant válido.
+            # Se o alvo nunca registrou um GrantManager (nunca exigiu consent), permite
+            # (compatibilidade retroativa). A checagem de autorização vem ANTES da
+            # verificação de endpoint para não vazar estado do agente sem consent.
+            if target in self._grant_managers:
+                mgr = self._grant_managers[target]
+                valid = mgr.validate_grant(grant, tool_name) if grant else None
+                if valid is None:
+                    return {
+                        "error": "authorization_required",
+                        "hint": "call access/request first",
+                        "target": target,
+                    }
+
             if not card.endpoint:
                 return {"error": f"Agent '{target}' has no live endpoint for invocation"}
             try:
@@ -801,6 +996,7 @@ class GA2AServer:
                 "tool": tool_name,
                 "arguments": arguments,
                 "zone": info.get("zone", zone_name),
+                "grant": grant,
             })
 
         return {"error": f"Agent '{target}' not found (local zone '{zone_name}' or remote)"}
@@ -819,7 +1015,161 @@ class GA2AServer:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
+    # ─── Access / consentimento (v0.5.0) ────────────────────────
+
+    async def _h_access_request(self, params):
+        """
+        Solicita autorização para interagir com um agente (local ou remoto).
+        Params: {from_agent, target, zone, interest, tool}
+
+        Local: submete o pedido ao GrantManager do alvo. Se auto-aprovado por
+        política, também retorna o token de grant serializado.
+        Remoto: encaminha o pedido para a instância dona do agente.
+        """
+        from_agent = params.get("from_agent", params.get("from", ""))
+        target = params.get("target", params.get("target_agent", ""))
+        zone_name = params.get("zone", "General")
+        interest = params.get("interest", "")
+        tool_name = params.get("tool", "")
+
+        if not target:
+            return {"error": "target is required"}
+
+        # Alvo remoto: proxy do pedido para a instância dona
+        if target not in self._grant_managers and target in self._remote_agents:
+            info = self._remote_agents[target]
+            endpoint = info.get("peer_endpoint", "")
+            proxied = await self._proxy_to_remote(endpoint, "access/request", {
+                "from_agent": from_agent,
+                "target": target,
+                "zone": info.get("zone", zone_name),
+                "interest": interest,
+                "tool": tool_name,
+            })
+            if proxied.get("status") == "ok":
+                return proxied["result"]
+            return {"error": proxied.get("error"), "source": "remote_proxy"}
+
+        # Alvo local: criar GrantManager se ainda não existir
+        mgr = self._get_grant_manager(target)
+        request = mgr.submit_request(
+            from_agent=from_agent, zone=zone_name,
+            interest=interest, tool=tool_name,
+        )
+
+        result = {
+            "request_id": request.request_id,
+            "status": request.status,
+            "target": target,
+        }
+        if request.status == "approved":
+            grant = mgr.get_grant_for_request(request.request_id)
+            if grant is not None:
+                result["grant"] = mgr.serialize_grant(grant)
+
+        log.info(f"🔑 access/request {from_agent} → {target} (tool: {tool_name or '*'}) = {request.status}")
+        return result
+
+    async def _h_access_pending(self, params):
+        """Lista pedidos pendentes para um agente local. Params: {agent_name}."""
+        agent_name = params.get("agent_name", "")
+        if not agent_name:
+            return {"error": "agent_name is required"}
+        mgr = self._grant_managers.get(agent_name)
+        pending = mgr.list_pending() if mgr else []
+        return {
+            "agent": agent_name,
+            "pending": [r.to_dict() for r in pending],
+            "count": len(pending),
+        }
+
+    async def _h_access_approve(self, params):
+        """Aprova um pedido pendente e emite um grant. Params: {agent_name, request_id, scope?, ttl?}."""
+        agent_name = params.get("agent_name", "")
+        request_id = params.get("request_id", "")
+        scope = params.get("scope", None)
+        ttl = params.get("ttl", None)
+
+        if not agent_name or not request_id:
+            return {"error": "agent_name and request_id are required"}
+
+        mgr = self._grant_managers.get(agent_name)
+        if mgr is None:
+            return {"error": f"No grant manager for agent '{agent_name}'"}
+
+        grant = mgr.approve(request_id, scope=scope, ttl=ttl)
+        if grant is None:
+            return {"error": "request not found or not pending", "request_id": request_id}
+
+        log.info(f"✅ access/approve {agent_name} aprovou {request_id} (scope: {grant.scope})")
+        return {"status": "approved", "grant_token": mgr.serialize_grant(grant)}
+
+    async def _h_access_deny(self, params):
+        """Nega um pedido pendente. Params: {agent_name, request_id}."""
+        agent_name = params.get("agent_name", "")
+        request_id = params.get("request_id", "")
+
+        if not agent_name or not request_id:
+            return {"error": "agent_name and request_id are required"}
+
+        mgr = self._grant_managers.get(agent_name)
+        if mgr is None:
+            return {"error": f"No grant manager for agent '{agent_name}'"}
+
+        ok = mgr.deny(request_id)
+        log.info(f"⛔ access/deny {agent_name} negou {request_id} = {ok}")
+        return {"status": "denied" if ok else "not_found", "request_id": request_id}
+
+    async def _h_access_revoke(self, params):
+        """Revoga um grant emitido. Params: {agent_name, grant_id}."""
+        agent_name = params.get("agent_name", "")
+        grant_id = params.get("grant_id", "")
+
+        if not agent_name or not grant_id:
+            return {"error": "agent_name and grant_id are required"}
+
+        mgr = self._grant_managers.get(agent_name)
+        if mgr is None:
+            return {"error": f"No grant manager for agent '{agent_name}'"}
+
+        ok = mgr.revoke(grant_id)
+        log.info(f"🗑️  access/revoke {agent_name} revogou {grant_id} = {ok}")
+        return {"status": "revoked" if ok else "not_found", "grant_id": grant_id}
+
+    async def _h_access_grants(self, params):
+        """Lista os grants emitidos por um agente local. Params: {agent_name}."""
+        agent_name = params.get("agent_name", "")
+        if not agent_name:
+            return {"error": "agent_name is required"}
+        mgr = self._grant_managers.get(agent_name)
+        grants = mgr.list_grants() if mgr else []
+        return {
+            "agent": agent_name,
+            "grants": [g.to_dict() for g in grants],
+            "count": len(grants),
+        }
+
     # ─── Network (v0.4.0) ───────────────────────────────────────
+
+    async def _h_network_hello(self, params):
+        """
+        Handshake unicast + gossip (v0.5.0).
+
+        Recebe a identidade de um peer (params = identity dict), registra-o
+        como peer conhecido (via NetworkDiscovery) e responde com NOSSA
+        identidade E a lista dos peers que conhecemos (gossip), para que o
+        remetente aprenda a malha inteira.
+        """
+        if params and params.get("instance_id"):
+            self._learn_peer(params)
+            # Gossip: o peer pode ter anexado os peers que ele conhece
+            for p in params.get("known_peers", []):
+                self._learn_peer(p)
+
+        return {
+            "identity": self._self_identity(),
+            "known_peers": self._known_peer_identities(),
+        }
 
     async def _h_network_peers(self, params):
         """Lista todas as instâncias GA2A descobertas na LAN."""
@@ -1054,10 +1404,13 @@ async def _send(send_fn, status, body, content_type="application/json"):
 # ─── Main ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="GA2A Zone Server v0.4.0 (LAN discovery)")
+    parser = argparse.ArgumentParser(
+        description="GA2A Zone Server v0.5.0 (LAN discovery + consent + unicast/gossip)")
     parser.add_argument("--port", type=int, default=0, help="MCP port (0=auto)")
     parser.add_argument("--name", type=str, default=None, help="Instance name (default: ga2a-<ip>-<port>)")
     parser.add_argument("--broadcast-port", type=int, default=5060, help="UDP broadcast port for LAN discovery")
+    parser.add_argument("--peer", action="append", default=None,
+                        help="host:port of a known GA2A instance to seed from (unicast/VPN). Repeatable.")
     args = parser.parse_args()
 
     if args.port == 0:
@@ -1070,6 +1423,7 @@ def main():
         my_port=args.port,
         instance_name=args.name,
         broadcast_port=args.broadcast_port,
+        seed_peers=args.peer,
     )
 
     def _sig(sig, frame):

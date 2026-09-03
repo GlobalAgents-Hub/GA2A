@@ -135,6 +135,62 @@ class NetworkDiscovery:
         """Return all currently known remote peers."""
         return dict(self._known_peers)
 
+    def register_unicast_peer(self, peer_info: dict) -> bool:
+        """Register a peer learned via unicast (network/hello) rather than broadcast.
+
+        This lets the discovery mesh work over VPNs / across subnets where UDP
+        broadcast is blocked. The peer is added to the known-peers map and its
+        last-seen timestamp is refreshed, so the reaper keeps it alive while it
+        continues to be re-contacted. Fires the appropriate callback.
+
+        Args:
+            peer_info: A peer identity dict containing at least ``instance_id``.
+                Expected keys mirror a broadcast heartbeat: ``host``, ``port``,
+                ``mcp_endpoint``, ``zones``, ``agents``, ``agent_details``.
+
+        Returns:
+            True if this was a newly discovered peer, False if it was already
+            known (an update) or could not be registered.
+        """
+        instance_id = peer_info.get("instance_id", "")
+        if not instance_id:
+            return False
+
+        # Never register ourselves.
+        my_id = self._identity.get("instance_id", "")
+        if instance_id == my_id:
+            return False
+
+        # Ensure an mcp_endpoint exists if host/port were provided.
+        if not peer_info.get("mcp_endpoint"):
+            host = peer_info.get("host", "")
+            port = peer_info.get("port", 0)
+            if host and port:
+                peer_info["mcp_endpoint"] = f"http://{host}:{port}/mcp"
+
+        is_new = instance_id not in self._known_peers
+        self._known_peers[instance_id] = peer_info
+        self._last_seen[instance_id] = time.time()
+
+        if is_new:
+            logger.info(
+                "🟢 Peer discovered (unicast): %s at %s",
+                instance_id, peer_info.get("mcp_endpoint", "?"),
+            )
+            if self._on_peer_discovered:
+                try:
+                    self._on_peer_discovered(peer_info)
+                except Exception as e:
+                    logger.debug("Error in on_peer_discovered callback: %s", e)
+        else:
+            if self._on_peer_updated:
+                try:
+                    self._on_peer_updated(peer_info)
+                except Exception as e:
+                    logger.debug("Error in on_peer_updated callback: %s", e)
+
+        return is_new
+
     def get_peer(self, instance_id: str) -> Optional[Dict[str, Any]]:
         """Get a specific peer by instance_id."""
         return self._known_peers.get(instance_id)
