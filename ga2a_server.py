@@ -991,13 +991,20 @@ class GA2AServer:
             info = self._remote_agents[target]
             endpoint = info.get("peer_endpoint", "")
             log.info(f"🛰️  Proxy invoke '{target}.{tool_name}' → {info.get('peer_instance')} ({endpoint})")
-            return await self._proxy_to_remote(endpoint, "agent/invoke", {
+            proxied = await self._proxy_to_remote(endpoint, "agent/invoke", {
                 "target_agent": target,
                 "tool": tool_name,
                 "arguments": arguments,
                 "zone": info.get("zone", zone_name),
                 "grant": grant,
             })
+            # Se a instância remota devolveu um resultado de erro (ex.:
+            # authorization_required), propaga-o no nível superior em vez de
+            # aninhá-lo dentro de "result".
+            if proxied.get("status") == "ok" and isinstance(proxied.get("result"), dict) \
+                    and "error" in proxied["result"]:
+                return proxied["result"]
+            return proxied
 
         return {"error": f"Agent '{target}' not found (local zone '{zone_name}' or remote)"}
 
@@ -1035,8 +1042,13 @@ class GA2AServer:
         if not target:
             return {"error": "target is required"}
 
-        # Alvo remoto: proxy do pedido para a instância dona
-        if target not in self._grant_managers and target in self._remote_agents:
+        # O alvo só é LOCAL se estiver registrado como agente local (self._agents).
+        # Ter um GrantManager não basta — um manager pode ter sido criado por engano.
+        # Se o alvo é conhecido como remoto, o pedido DEVE ser proxied para a
+        # instância dona (que possui o segredo e as políticas de auto-approve).
+        is_local = target in self._agents
+
+        if not is_local and target in self._remote_agents:
             info = self._remote_agents[target]
             endpoint = info.get("peer_endpoint", "")
             proxied = await self._proxy_to_remote(endpoint, "access/request", {
@@ -1047,7 +1059,9 @@ class GA2AServer:
                 "tool": tool_name,
             })
             if proxied.get("status") == "ok":
-                return proxied["result"]
+                result = proxied["result"]
+                result["source"] = "remote"
+                return result
             return {"error": proxied.get("error"), "source": "remote_proxy"}
 
         # Alvo local: criar GrantManager se ainda não existir
