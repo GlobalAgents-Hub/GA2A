@@ -1,0 +1,499 @@
+{
+  "protocol": "GA2A",
+  "version": "0.5.0",
+  "transport": {
+    "type": "JSON-RPC 2.0 over HTTP",
+    "endpoint": "POST http://<host>:<port>/mcp",
+    "content_type": "application/json",
+    "envelope": {
+      "request": {"jsonrpc": "2.0", "id": "<number>", "method": "<string>", "params": {}},
+      "response_success": {"jsonrpc": "2.0", "id": "<number>", "result": {}},
+      "response_error": {"jsonrpc": "2.0", "id": "<number>", "error": {"code": "<int>", "message": "<string>"}}
+    }
+  },
+  "notes": [
+    "Discovery is open: any agent can list/see others.",
+    "Interaction (agent/invoke, agent/request with a tool) requires a valid grant when the target agent registered without auto_approve.",
+    "Grants are HMAC-signed, scoped (tool / zone:<name> / *), and expire (TTL, default 1800s).",
+    "Cross-machine works via LAN UDP broadcast and/or VPN unicast seed (--peer) + gossip.",
+    "The server proxies invocations to the agent's own MCP endpoint; agents without a live endpoint are discoverable/authorizable but not executable.",
+    "Handler-level failures are returned as a normal JSON-RPC result object containing an 'error' string field (application error), not as a JSON-RPC 'error' envelope. Protocol-level failures (parse error -32700, unknown method -32601) use the JSON-RPC 'error' envelope.",
+    "Default zones created at startup: General, AI-Research, DevOps, Data-Science. Most agent/zone methods default 'zone' to 'General' when omitted."
+  ],
+  "flows": [
+    {
+      "name": "activate_agent",
+      "description": "Bring an agent online: handshake with the server, then join a zone declaring its tools/interests. If auto_approve is omitted/false, interactions with this agent will require an explicit access grant.",
+      "steps": ["initialize", "agent/join"]
+    },
+    {
+      "name": "discover_and_authorize",
+      "description": "Find agents across the whole network, locate one that offers a tool, request authorization, have the owner approve it (yielding a grant token), then invoke the tool with that grant.",
+      "steps": ["network/agents", "network/find", "access/request", "access/approve", "agent/invoke"]
+    },
+    {
+      "name": "cross_network_vpn",
+      "description": "For cross-subnet / VPN federation where UDP broadcast does not cross the link, start the server with one or more seed peers: `python3 ga2a_server.py --port 9420 --peer <host:port>`. On startup the server sends a 'network/hello' to each seed with its own identity; the seed replies with its identity plus every peer it already knows (gossip), so the whole mesh is learned transitively. The server re-contacts seeds periodically to keep the mesh alive. Once peers are known, remote agents appear in network/agents and can be invoked via proxy just like LAN-discovered ones.",
+      "steps": ["network/hello"]
+    }
+  ],
+  "methods": {
+    "initialize": {
+      "summary": "Handshake; returns server info, capabilities, and available zones.",
+      "category": "handshake",
+      "params": {},
+      "returns": {
+        "protocolVersion": {"type": "string", "description": "MCP protocol version string (\"2024-11-05\")."},
+        "serverInfo": {"type": "object", "description": "{name, version} of the GA2A server."},
+        "model": {"type": "string", "description": "Description of the server model."},
+        "instance": {"type": "string", "description": "This server instance's name."},
+        "host": {"type": "string", "description": "This server's LAN host/IP."},
+        "capabilities": {"type": "object", "description": "Feature flags: zones, matchmaking, contextSharing, lanDiscovery, remoteProxy (all booleans)."},
+        "zones": {"type": "array<string>", "description": "Names of zones currently known to this instance."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+      "example_response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+          "protocolVersion": "2024-11-05",
+          "serverInfo": {"name": "GA2A-Server", "version": "0.5.0"},
+          "model": "distributed-context + LAN federation",
+          "instance": "ga2a-192.168.1.10-9420",
+          "host": "192.168.1.10",
+          "capabilities": {"zones": true, "matchmaking": true, "contextSharing": true, "lanDiscovery": true, "remoteProxy": true},
+          "zones": ["General", "AI-Research", "DevOps", "Data-Science"]
+        }
+      }
+    },
+    "zones/list": {
+      "summary": "List all zones (local + aggregated from remote peers) with agent counts.",
+      "category": "zones",
+      "params": {},
+      "returns": {
+        "zones": {"type": "object", "description": "Map of zone_name -> {agent_count, agents[], source (local|remote|mixed), remote_agents[]? (each {agent, instance})}."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 2, "method": "zones/list", "params": {}},
+      "example_response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+          "zones": {
+            "General": {"agent_count": 1, "agents": ["analyzer"], "source": "local"},
+            "AI-Research": {"agent_count": 0, "agents": [], "source": "local"},
+            "DevOps": {
+              "agent_count": 1,
+              "agents": [],
+              "source": "mixed",
+              "remote_agents": [{"agent": "deployer", "instance": "ga2a-192.168.1.20-9420"}]
+            }
+          }
+        }
+      }
+    },
+    "zones/create": {
+      "summary": "Create a new zone by name.",
+      "category": "zones",
+      "params": {
+        "name": {"type": "string", "required": true, "description": "Name of the zone to create."}
+      },
+      "returns": {
+        "status": {"type": "string", "description": "\"created\" on success."},
+        "zone": {"type": "string", "description": "The created zone name."},
+        "error": {"type": "string", "description": "Present when name is missing or the zone already exists."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 3, "method": "zones/create", "params": {"name": "Robotics"}},
+      "example_response": {"jsonrpc": "2.0", "id": 3, "result": {"status": "created", "zone": "Robotics"}}
+    },
+    "agent/join": {
+      "summary": "Join a zone declaring capabilities (tools/resources), interests, endpoint, and consent policy. Aliased by zones/join and agent/register.",
+      "category": "agent",
+      "params": {
+        "zone": {"type": "string", "required": false, "description": "Zone to join; created if it does not exist.", "default": "General"},
+        "agent_name": {"type": "string", "required": true, "description": "Unique agent name."},
+        "agent_role": {"type": "string", "required": false, "description": "Human-readable role/description.", "default": "agent"},
+        "tools": {"type": "array<object>", "required": false, "description": "Tools offered. Each: {name (required), description?, input_schema?}.", "default": "[]"},
+        "resources": {"type": "array<object>", "required": false, "description": "Resources offered. Each: {uri (required), name?, description?, mime_type?}.", "default": "[]"},
+        "interests": {"type": "array<string>", "required": false, "description": "What the agent seeks; used for matchmaking.", "default": "[]"},
+        "endpoint": {"type": "string", "required": false, "description": "The agent's own MCP endpoint used by the server to proxy tools/call. Without it the agent is discoverable but not invocable.", "default": "\"\""},
+        "auto_approve": {"type": "boolean|array<object>", "required": false, "description": "Consent policy. true = approve everything automatically (no grant prompt). A list of policy dicts (each may specify from_agent, zone, interest, tool) adds auto-approval rules. Absent/false = interactions stay pending until manual approval.", "default": "false"}
+      },
+      "returns": {
+        "status": {"type": "string", "description": "\"joined\" on success."},
+        "zone": {"type": "string", "description": "Zone joined."},
+        "agent": {"type": "string", "description": "Agent name."},
+        "peers": {"type": "array<string>", "description": "Other agents already in the zone."},
+        "matches": {"type": "array<object>", "description": "Local matches for the declared interests (each {agent, role, score, matching_tools[], endpoint, source})."},
+        "error": {"type": "string", "description": "Present when agent_name is missing."}
+      },
+      "example_request": {
+        "jsonrpc": "2.0", "id": 4, "method": "agent/join",
+        "params": {
+          "zone": "AI-Research",
+          "agent_name": "analyzer",
+          "agent_role": "data analyst",
+          "tools": [{"name": "analyze", "description": "run statistical analysis", "input_schema": {"type": "object"}}],
+          "interests": ["visualization"],
+          "endpoint": "http://192.168.1.11:8000/mcp",
+          "auto_approve": false
+        }
+      },
+      "example_response": {
+        "jsonrpc": "2.0", "id": 4,
+        "result": {"status": "joined", "zone": "AI-Research", "agent": "analyzer", "peers": ["plotter"], "matches": [{"agent": "plotter", "role": "chart maker", "score": 1, "matching_tools": [{"name": "make_chart", "description": "visualization tool"}], "endpoint": "http://192.168.1.12:8000/mcp", "source": "local"}]}
+      }
+    },
+    "agent/leave": {
+      "summary": "Remove an agent from a zone and drop its grant manager.",
+      "category": "agent",
+      "params": {
+        "zone": {"type": "string", "required": false, "description": "Zone to leave.", "default": "General"},
+        "agent_name": {"type": "string", "required": true, "description": "Agent to remove."}
+      },
+      "returns": {
+        "status": {"type": "string", "description": "\"left\"."},
+        "zone": {"type": "string", "description": "Zone left."},
+        "agent": {"type": "string", "description": "Agent removed."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 5, "method": "agent/leave", "params": {"zone": "AI-Research", "agent_name": "analyzer"}},
+      "example_response": {"jsonrpc": "2.0", "id": 5, "result": {"status": "left", "zone": "AI-Research", "agent": "analyzer"}}
+    },
+    "agent/match": {
+      "summary": "Matchmaking: find local and remote agents whose capabilities satisfy the caller's interests.",
+      "category": "agent",
+      "params": {
+        "zone": {"type": "string", "required": false, "description": "Zone to search for local matches.", "default": "General"},
+        "agent_name": {"type": "string", "required": false, "description": "The requesting agent (excluded from results); also used to look up stored interests if 'interests' is omitted."},
+        "interests": {"type": "array<string>", "required": false, "description": "Interests to match. If omitted, falls back to the interests declared at join time."}
+      },
+      "returns": {
+        "zone": {"type": "string", "description": "Zone searched."},
+        "agent": {"type": "string", "description": "Requesting agent."},
+        "interests": {"type": "array<string>", "description": "Interests used for matching."},
+        "matches": {"type": "array<object>", "description": "Local matches: {agent, role, score, matching_tools[], endpoint, source}."},
+        "remote_matches": {"type": "array<object>", "description": "Remote matches: {agent, role, score, matching_tools[], peer_endpoint, peer_instance, zone, source}."},
+        "note": {"type": "string", "description": "Present when no interests are available to match on."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 6, "method": "agent/match", "params": {"zone": "AI-Research", "agent_name": "analyzer", "interests": ["visualization"]}},
+      "example_response": {
+        "jsonrpc": "2.0", "id": 6,
+        "result": {
+          "zone": "AI-Research", "agent": "analyzer", "interests": ["visualization"],
+          "matches": [{"agent": "plotter", "role": "chart maker", "score": 1, "matching_tools": [{"name": "make_chart", "description": "visualization tool"}], "endpoint": "http://192.168.1.12:8000/mcp", "source": "local"}],
+          "remote_matches": []
+        }
+      }
+    },
+    "agent/discover": {
+      "summary": "List capabilities of agents in a zone (local, plus remote unless filtered out), optionally filtered by tool.",
+      "category": "agent",
+      "params": {
+        "zone": {"type": "string", "required": false, "description": "Zone to inspect.", "default": "General"},
+        "tool": {"type": "string", "required": false, "description": "If set, only agents offering this tool are returned."},
+        "include_remote": {"type": "boolean", "required": false, "description": "Include remote agents from discovered peers.", "default": "true"}
+      },
+      "returns": {
+        "zone": {"type": "string", "description": "Zone inspected."},
+        "capabilities": {"type": "array<object>", "description": "Local agents: {agent, role, endpoint, tools[{name, description, input_schema}], interests[], source=local}."},
+        "remote_capabilities": {"type": "array<object>", "description": "Remote agents: {agent, role, endpoint, tools[], interests[], source=remote, peer_instance, peer_host}."},
+        "error": {"type": "string", "description": "Present when the zone is not found."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 7, "method": "agent/discover", "params": {"zone": "AI-Research", "tool": "make_chart", "include_remote": true}},
+      "example_response": {
+        "jsonrpc": "2.0", "id": 7,
+        "result": {
+          "zone": "AI-Research",
+          "capabilities": [{"agent": "plotter", "role": "chart maker", "endpoint": "http://192.168.1.12:8000/mcp", "tools": [{"name": "make_chart", "description": "visualization tool", "input_schema": {}}], "interests": [], "source": "local"}],
+          "remote_capabilities": []
+        }
+      }
+    },
+    "agent/request": {
+      "summary": "Request context from another agent (local or remote). With a live endpoint + tool it proxies a tools/call; otherwise returns the target's capability declaration.",
+      "category": "agent",
+      "params": {
+        "from": {"type": "string", "required": false, "description": "Requesting agent name (for logging/history)."},
+        "target": {"type": "string", "required": true, "description": "Target agent name (local zone or remote)."},
+        "zone": {"type": "string", "required": false, "description": "Zone context.", "default": "General"},
+        "interest": {"type": "string", "required": false, "description": "Human-readable reason for the request."},
+        "tool": {"type": "string", "required": false, "description": "Tool to invoke on the target's endpoint. If omitted (or the target has no endpoint), the target's capability declaration is returned instead."},
+        "arguments": {"type": "object", "required": false, "description": "Arguments passed to the target tool.", "default": "{}"}
+      },
+      "returns": {
+        "status": {"type": "string", "description": "\"context_delivered\" on success."},
+        "from": {"type": "string", "description": "The target agent that supplied the context."},
+        "to": {"type": "string", "description": "The requesting agent."},
+        "interest": {"type": "string", "description": "The interest echoed back."},
+        "context": {"type": "object", "description": "Tool result, capability declaration, or an {error, fallback} object if the endpoint/proxy was unreachable."},
+        "error": {"type": "string", "description": "Present when the target agent is not found."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 8, "method": "agent/request", "params": {"from": "analyzer", "target": "plotter", "zone": "AI-Research", "interest": "chart my results", "tool": "make_chart", "arguments": {"series": [1, 2, 3]}}},
+      "example_response": {
+        "jsonrpc": "2.0", "id": 8,
+        "result": {"status": "context_delivered", "from": "plotter", "to": "analyzer", "interest": "chart my results", "context": {"content": [{"type": "text", "text": "chart generated"}]}}
+      }
+    },
+    "agent/context": {
+      "summary": "Summarize all context available to an agent in a zone: peers and their tools (ranked by match), plus recent context-exchange history.",
+      "category": "agent",
+      "params": {
+        "agent_name": {"type": "string", "required": true, "description": "The agent whose view is requested; also used to look up its interests."},
+        "zone": {"type": "string", "required": false, "description": "Zone to inspect.", "default": "General"}
+      },
+      "returns": {
+        "agent": {"type": "string", "description": "The agent."},
+        "zone": {"type": "string", "description": "The zone."},
+        "my_interests": {"type": "array<string>", "description": "The agent's declared interests."},
+        "available_context": {"type": "array<object>", "description": "Other agents ranked by match: {agent, role, tools[], match_score}."},
+        "context_history": {"type": "array<object>", "description": "Up to the last 10 context exchanges involving this agent."},
+        "error": {"type": "string", "description": "Present when the zone is not found."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 9, "method": "agent/context", "params": {"agent_name": "analyzer", "zone": "AI-Research"}},
+      "example_response": {
+        "jsonrpc": "2.0", "id": 9,
+        "result": {
+          "agent": "analyzer", "zone": "AI-Research", "my_interests": ["visualization"],
+          "available_context": [{"agent": "plotter", "role": "chart maker", "tools": ["make_chart"], "match_score": 1}],
+          "context_history": []
+        }
+      }
+    },
+    "agent/invoke": {
+      "summary": "Invoke a tool on another agent via proxy. Local targets with a grant manager require a valid grant; remote targets are forwarded to the owning instance.",
+      "category": "invoke",
+      "params": {
+        "target_agent": {"type": "string", "required": true, "description": "Target agent name. Also accepted as 'target'."},
+        "target": {"type": "string", "required": false, "description": "Alias for target_agent (used if target_agent is absent)."},
+        "tool": {"type": "string", "required": true, "description": "Tool name to invoke on the target's endpoint."},
+        "arguments": {"type": "object", "required": false, "description": "Arguments for the tool.", "default": "{}"},
+        "zone": {"type": "string", "required": false, "description": "Zone context.", "default": "General"},
+        "grant": {"type": "string", "required": false, "description": "Serialized grant token. Required when the target registered a consent policy (i.e. did not auto_approve everything).", "default": "\"\""}
+      },
+      "returns": {
+        "status": {"type": "string", "description": "\"ok\" on success or \"error\" on failure."},
+        "result": {"type": "object", "description": "The target tool's result (present when status=ok)."},
+        "error": {"type": "string|object", "description": "Error detail (present when status=error)."},
+        "hint": {"type": "string", "description": "For error=\"authorization_required\": suggests calling access/request first."},
+        "target": {"type": "string", "description": "Echoed target for authorization_required errors."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 10, "method": "agent/invoke", "params": {"target_agent": "plotter", "tool": "make_chart", "arguments": {"series": [1, 2, 3]}, "zone": "AI-Research", "grant": "eyJ...payload....<sig>"}},
+      "example_response": {"jsonrpc": "2.0", "id": 10, "result": {"status": "ok", "result": {"content": [{"type": "text", "text": "chart generated"}]}}}
+    },
+    "agent/message": {
+      "summary": "Send a lightweight message between agents (logged and acknowledged, not routed to an endpoint).",
+      "category": "agent",
+      "params": {
+        "from": {"type": "string", "required": false, "description": "Sender agent name.", "default": "anonymous"},
+        "to": {"type": "string", "required": false, "description": "Recipient agent name."},
+        "zone": {"type": "string", "required": false, "description": "Zone context.", "default": "General"},
+        "message": {"type": "string", "required": false, "description": "Message text."}
+      },
+      "returns": {
+        "status": {"type": "string", "description": "\"delivered\"."},
+        "from": {"type": "string", "description": "Sender."},
+        "to": {"type": "string", "description": "Recipient."},
+        "zone": {"type": "string", "description": "Zone."},
+        "timestamp": {"type": "string", "description": "ISO 8601 UTC timestamp."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 11, "method": "agent/message", "params": {"from": "analyzer", "to": "plotter", "zone": "AI-Research", "message": "results ready"}},
+      "example_response": {"jsonrpc": "2.0", "id": 11, "result": {"status": "delivered", "from": "analyzer", "to": "plotter", "zone": "AI-Research", "timestamp": "2025-01-01T12:00:00+00:00"}}
+    },
+    "access/request": {
+      "summary": "Request authorization to interact with an agent. Auto-approved by policy returns a grant token immediately; otherwise the request is queued pending. Remote targets are proxied to the owning instance.",
+      "category": "access",
+      "params": {
+        "from_agent": {"type": "string", "required": false, "description": "Requesting agent name. Also accepted as 'from'."},
+        "target": {"type": "string", "required": true, "description": "Target agent name. Also accepted as 'target_agent'."},
+        "zone": {"type": "string", "required": false, "description": "Zone context.", "default": "General"},
+        "interest": {"type": "string", "required": false, "description": "Human-readable reason for the request."},
+        "tool": {"type": "string", "required": false, "description": "Specific tool being requested; determines the default grant scope on approval."}
+      },
+      "returns": {
+        "request_id": {"type": "string", "description": "Identifier of the created request."},
+        "status": {"type": "string", "description": "\"pending\" or \"approved\" (auto-approved by policy)."},
+        "target": {"type": "string", "description": "The target agent."},
+        "grant": {"type": "string", "description": "Serialized grant token, present only when status is \"approved\"."},
+        "source": {"type": "string", "description": "\"remote\" when the request was proxied to another instance."},
+        "error": {"type": "string", "description": "Present when target is missing or the remote proxy failed."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 12, "method": "access/request", "params": {"from_agent": "analyzer", "target": "plotter", "zone": "AI-Research", "interest": "chart my results", "tool": "make_chart"}},
+      "example_response": {"jsonrpc": "2.0", "id": 12, "result": {"request_id": "9f1c2b...hex", "status": "pending", "target": "plotter"}}
+    },
+    "access/pending": {
+      "summary": "List pending access requests awaiting an agent owner's decision.",
+      "category": "access",
+      "params": {
+        "agent_name": {"type": "string", "required": true, "description": "The owning agent whose pending requests to list."}
+      },
+      "returns": {
+        "agent": {"type": "string", "description": "The owning agent."},
+        "pending": {"type": "array<object>", "description": "Pending requests, each {request_id, from_agent, to_agent, zone, interest, tool, created_at, status}."},
+        "count": {"type": "int", "description": "Number of pending requests."},
+        "error": {"type": "string", "description": "Present when agent_name is missing."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 13, "method": "access/pending", "params": {"agent_name": "plotter"}},
+      "example_response": {
+        "jsonrpc": "2.0", "id": 13,
+        "result": {"agent": "plotter", "pending": [{"request_id": "9f1c2b...hex", "from_agent": "analyzer", "to_agent": "plotter", "zone": "AI-Research", "interest": "chart my results", "tool": "make_chart", "created_at": 1735732800.0, "status": "pending"}], "count": 1}
+      }
+    },
+    "access/approve": {
+      "summary": "Approve a pending request and issue a signed grant token.",
+      "category": "access",
+      "params": {
+        "agent_name": {"type": "string", "required": true, "description": "The owning agent approving the request."},
+        "request_id": {"type": "string", "required": true, "description": "Id of the pending request to approve."},
+        "scope": {"type": "string", "required": false, "description": "Grant scope: a tool name, \"zone:<name>\", or \"*\". Defaults to the requested tool, or \"*\" if none."},
+        "ttl": {"type": "number", "required": false, "description": "Grant lifetime in seconds.", "default": "1800"}
+      },
+      "returns": {
+        "status": {"type": "string", "description": "\"approved\" on success."},
+        "grant_token": {"type": "string", "description": "Serialized HMAC-signed grant token (base64(payload).signature)."},
+        "error": {"type": "string", "description": "Present when params are missing, no manager exists, or the request is not pending."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 14, "method": "access/approve", "params": {"agent_name": "plotter", "request_id": "9f1c2b...hex", "scope": "make_chart", "ttl": 1800}},
+      "example_response": {"jsonrpc": "2.0", "id": 14, "result": {"status": "approved", "grant_token": "eyJ...payload....<sig>"}}
+    },
+    "access/deny": {
+      "summary": "Deny a pending access request.",
+      "category": "access",
+      "params": {
+        "agent_name": {"type": "string", "required": true, "description": "The owning agent denying the request."},
+        "request_id": {"type": "string", "required": true, "description": "Id of the pending request to deny."}
+      },
+      "returns": {
+        "status": {"type": "string", "description": "\"denied\" if a pending request was found, otherwise \"not_found\"."},
+        "request_id": {"type": "string", "description": "The request id echoed back."},
+        "error": {"type": "string", "description": "Present when params are missing or no manager exists."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 15, "method": "access/deny", "params": {"agent_name": "plotter", "request_id": "9f1c2b...hex"}},
+      "example_response": {"jsonrpc": "2.0", "id": 15, "result": {"status": "denied", "request_id": "9f1c2b...hex"}}
+    },
+    "access/revoke": {
+      "summary": "Revoke a previously issued grant by id.",
+      "category": "access",
+      "params": {
+        "agent_name": {"type": "string", "required": true, "description": "The owning agent revoking the grant."},
+        "grant_id": {"type": "string", "required": true, "description": "Id of the grant to revoke."}
+      },
+      "returns": {
+        "status": {"type": "string", "description": "\"revoked\" if the grant existed and is now revoked, otherwise \"not_found\"."},
+        "grant_id": {"type": "string", "description": "The grant id echoed back."},
+        "error": {"type": "string", "description": "Present when params are missing or no manager exists."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 16, "method": "access/revoke", "params": {"agent_name": "plotter", "grant_id": "a1b2c3...hex"}},
+      "example_response": {"jsonrpc": "2.0", "id": 16, "result": {"status": "revoked", "grant_id": "a1b2c3...hex"}}
+    },
+    "access/grants": {
+      "summary": "List all grants issued by an agent owner (including revoked ones).",
+      "category": "access",
+      "params": {
+        "agent_name": {"type": "string", "required": true, "description": "The owning agent whose grants to list."}
+      },
+      "returns": {
+        "agent": {"type": "string", "description": "The owning agent."},
+        "grants": {"type": "array<object>", "description": "Grants, each {grant_id, from_agent, to_agent, zone, scope, issued_at, expires_at, signature}."},
+        "count": {"type": "int", "description": "Number of grants."},
+        "error": {"type": "string", "description": "Present when agent_name is missing."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 17, "method": "access/grants", "params": {"agent_name": "plotter"}},
+      "example_response": {
+        "jsonrpc": "2.0", "id": 17,
+        "result": {"agent": "plotter", "grants": [{"grant_id": "a1b2c3...hex", "from_agent": "analyzer", "to_agent": "plotter", "zone": "AI-Research", "scope": "make_chart", "issued_at": 1735732800.0, "expires_at": 1735734600.0, "signature": "<hmac-sha256-hex>"}], "count": 1}
+      }
+    },
+    "network/peers": {
+      "summary": "List all GA2A instances discovered on the LAN, plus this instance's own identity.",
+      "category": "network",
+      "params": {},
+      "returns": {
+        "self": {"type": "object", "description": "This instance: {instance, host, port, mcp_endpoint}."},
+        "peers": {"type": "array<object>", "description": "Discovered peers: {instance, host, port, mcp_endpoint, zones[], agent_count, last_seen}."},
+        "peer_count": {"type": "int", "description": "Number of peers."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 18, "method": "network/peers", "params": {}},
+      "example_response": {
+        "jsonrpc": "2.0", "id": 18,
+        "result": {
+          "self": {"instance": "ga2a-192.168.1.10-9420", "host": "192.168.1.10", "port": 9420, "mcp_endpoint": "http://192.168.1.10:9420/mcp"},
+          "peers": [{"instance": "ga2a-192.168.1.20-9420", "host": "192.168.1.20", "port": 9420, "mcp_endpoint": "http://192.168.1.20:9420/mcp", "zones": ["DevOps"], "agent_count": 1, "last_seen": 1735732800.0}],
+          "peer_count": 1
+        }
+      }
+    },
+    "network/agents": {
+      "summary": "List every agent known to this instance: local agents and remote agents from discovered peers.",
+      "category": "network",
+      "params": {},
+      "returns": {
+        "local_agents": {"type": "array<object>", "description": "Local: {agent, role, zone, tools[], interests[], source=local, instance}."},
+        "remote_agents": {"type": "array<object>", "description": "Remote: {agent, role, zone, tools[], interests[], source=remote, instance, peer_endpoint, peer_host}."},
+        "total": {"type": "int", "description": "Total agent count (local + remote)."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 19, "method": "network/agents", "params": {}},
+      "example_response": {
+        "jsonrpc": "2.0", "id": 19,
+        "result": {
+          "local_agents": [{"agent": "analyzer", "role": "data analyst", "zone": "AI-Research", "tools": ["analyze"], "interests": ["visualization"], "source": "local", "instance": "ga2a-192.168.1.10-9420"}],
+          "remote_agents": [{"agent": "deployer", "role": "ops", "zone": "DevOps", "tools": ["deploy"], "interests": [], "source": "remote", "instance": "ga2a-192.168.1.20-9420", "peer_endpoint": "http://192.168.1.20:9420/mcp", "peer_host": "192.168.1.20"}],
+          "total": 2
+        }
+      }
+    },
+    "network/find": {
+      "summary": "Search the whole network (local + remote) for a named agent and/or a tool.",
+      "category": "network",
+      "params": {
+        "agent": {"type": "string", "required": false, "description": "Agent name to search for."},
+        "tool": {"type": "string", "required": false, "description": "Tool name to search for across all agents."}
+      },
+      "returns": {
+        "query": {"type": "object", "description": "Echoes {agent, tool}."},
+        "results": {"type": "array<object>", "description": "Matches. Local: {agent, role, zone, tools[]|tool, source=local, instance, endpoint}. Remote: {agent, role, zone, tools[]|tool, source=remote, instance, peer_endpoint}."},
+        "count": {"type": "int", "description": "Number of results."}
+      },
+      "example_request": {"jsonrpc": "2.0", "id": 20, "method": "network/find", "params": {"tool": "deploy"}},
+      "example_response": {
+        "jsonrpc": "2.0", "id": 20,
+        "result": {
+          "query": {"agent": "", "tool": "deploy"},
+          "results": [{"agent": "deployer", "role": "ops", "zone": "DevOps", "tool": "deploy", "source": "remote", "instance": "ga2a-192.168.1.20-9420", "peer_endpoint": "http://192.168.1.20:9420/mcp"}],
+          "count": 1
+        }
+      }
+    },
+    "network/hello": {
+      "summary": "Unicast handshake + gossip. Registers the caller's identity as a known peer and replies with this instance's identity plus every peer it knows (mesh learning). Used for VPN/cross-subnet seeding via --peer.",
+      "category": "network",
+      "params": {
+        "instance_id": {"type": "string", "required": true, "description": "The caller peer's unique instance name; required for the peer to be registered."},
+        "host": {"type": "string", "required": false, "description": "Caller's host/IP."},
+        "port": {"type": "int", "required": false, "description": "Caller's port."},
+        "mcp_endpoint": {"type": "string", "required": false, "description": "Caller's MCP endpoint URL."},
+        "zones": {"type": "array<string>", "required": false, "description": "Caller's active zones."},
+        "agents": {"type": "object", "required": false, "description": "Caller's agents grouped by zone: {zone: [agent_name, ...]}."},
+        "agent_details": {"type": "object", "required": false, "description": "Per-agent details: {agent_name: {role, tools[], interests[], zone, endpoint}}."},
+        "known_peers": {"type": "array<object>", "required": false, "description": "Optional list of peer identities the caller already knows, for transitive gossip."}
+      },
+      "returns": {
+        "identity": {"type": "object", "description": "This instance's identity: {instance_id, host, port, mcp_endpoint, zones[], agents{}, agent_details{}}."},
+        "known_peers": {"type": "array<object>", "description": "Identities of all peers this instance knows, each {instance_id, host, port, mcp_endpoint, zones[], agents{}, agent_details{}}."}
+      },
+      "example_request": {
+        "jsonrpc": "2.0", "id": 21, "method": "network/hello",
+        "params": {"instance_id": "ga2a-10.8.0.2-9420", "host": "10.8.0.2", "port": 9420, "mcp_endpoint": "http://10.8.0.2:9420/mcp", "zones": ["General"], "agents": {"General": ["scout"]}, "agent_details": {"scout": {"role": "explorer", "tools": ["scan"], "interests": [], "zone": "General", "endpoint": "http://10.8.0.2:8000/mcp"}}}
+      },
+      "example_response": {
+        "jsonrpc": "2.0", "id": 21,
+        "result": {
+          "identity": {"instance_id": "ga2a-192.168.1.10-9420", "host": "192.168.1.10", "port": 9420, "mcp_endpoint": "http://192.168.1.10:9420/mcp", "zones": ["AI-Research"], "agents": {"AI-Research": ["analyzer"]}, "agent_details": {"analyzer": {"role": "data analyst", "tools": ["analyze"], "interests": ["visualization"], "zone": "AI-Research", "endpoint": "http://192.168.1.11:8000/mcp"}}},
+          "known_peers": [{"instance_id": "ga2a-192.168.1.20-9420", "host": "192.168.1.20", "port": 9420, "mcp_endpoint": "http://192.168.1.20:9420/mcp", "zones": ["DevOps"], "agents": {"DevOps": ["deployer"]}, "agent_details": {}}]
+        }
+      }
+    }
+  },
+  "aliases": {
+    "zones/join": "agent/join",
+    "agent/register": "agent/join"
+  }
+}
