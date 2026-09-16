@@ -20,6 +20,8 @@ GA2A now ships a runnable, zero-config network: each machine runs an instance th
 
 **👉 Full hands-on guide: [GA2A_NETWORK_GUIDE.md](GA2A_NETWORK_GUIDE.md)**
 
+**🔌 Máquinas em redes diferentes (VPN)? Veja [GA2A_VPN_GUIDE.md](GA2A_VPN_GUIDE.md)**
+
 Quick start:
 ```bash
 # 1. Start an instance (auto-discovers peers on the LAN)
