@@ -10,10 +10,11 @@ agents can be discovered and invoked across machines.
 """
 import socket
 import json
+import ipaddress
 import threading
 import time
 import logging
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Iterator, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -393,3 +394,83 @@ def get_local_ip() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+# ─── Zero-config subnet scan (v0.6.0) ───────────────────────────
+#
+# When UDP broadcast is blocked (corporate client isolation, restrictive
+# switches) instances can still find each other by probing the local subnet
+# directly over TCP and completing an HTTP network/hello handshake on any host
+# that answers. These stdlib-only helpers support that scan.
+
+# Hard cap on how many hosts a single scan will probe, regardless of prefix.
+# A /24 is 254 hosts; a /23 ~510. This protects against accidentally scanning
+# an enormous subnet (e.g. a mistaken /16 = 65k hosts).
+_MAX_SCAN_HOSTS = 512
+
+
+def get_local_ipv4_cidr(prefix: int = 24) -> Optional[Tuple[str, int]]:
+    """Return (ip, prefix_len) for the primary LAN interface, or None.
+
+    We can't rely on netifaces (stdlib only), so this is pragmatic: the IP
+    comes from ``get_local_ip()`` and the prefix is whatever the caller asked
+    for (default /24). It exists so callers have a single place to obtain the
+    subnet descriptor to feed into ``iter_subnet_hosts``.
+    """
+    ip = get_local_ip()
+    if not ip or ip.startswith("127."):
+        return None
+    return (ip, prefix)
+
+
+def iter_subnet_hosts(local_ip: str, prefix: int = 24) -> Iterator[str]:
+    """Yield candidate host IPs on ``local_ip``'s subnet for the given prefix.
+
+    Uses ``ipaddress`` to compute the network from ``local_ip/prefix`` and
+    iterates its usable hosts (network/broadcast addresses are excluded by
+    ``.hosts()``). The local IP itself is skipped. Iteration is capped at
+    ``_MAX_SCAN_HOSTS`` to avoid huge scans.
+
+    Args:
+        local_ip: This machine's LAN IPv4 address (e.g. "10.202.92.146").
+        prefix: Subnet prefix length (24 => 254 hosts, 23 => ~510).
+    """
+    try:
+        network = ipaddress.ip_network(f"{local_ip}/{prefix}", strict=False)
+    except (ValueError, ipaddress.AddressValueError) as e:
+        logger.debug("iter_subnet_hosts: invalid network %s/%s: %s", local_ip, prefix, e)
+        return
+
+    count = 0
+    for host in network.hosts():
+        host_str = str(host)
+        if host_str == local_ip:
+            continue
+        yield host_str
+        count += 1
+        if count >= _MAX_SCAN_HOSTS:
+            logger.debug(
+                "iter_subnet_hosts: reached scan cap of %d hosts for %s",
+                _MAX_SCAN_HOSTS, network,
+            )
+            break
+
+
+def tcp_probe(host: str, port: int, timeout: float = 0.3) -> bool:
+    """Return True if a TCP connect to ``host:port`` succeeds within ``timeout``.
+
+    A fast, non-blocking-ish liveness check used to decide whether it's worth
+    attempting the (heavier) HTTP network/hello handshake against a host.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        return True
+    except (OSError, socket.timeout):
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass

@@ -13,6 +13,13 @@ Global option:
 
 Examples:
 
+  # ⭐ Paint a torrent-style map of the WHOLE network (recommended first step)
+  ga2a_client.py explore
+
+  # ⭐ One-shot guided interaction: find an agent, request access, invoke it
+  ga2a_client.py connect --from Kiro --agent Analyst --interest "need training" \\
+      --arg dataset=papers
+
   # Join a zone declaring tools + interests, auto-approving all access requests
   ga2a_client.py join --zone AI-Research --name TestBot --role ai \\
       --tool "gen:generates text" --interest "training data" --auto-approve
@@ -566,6 +573,176 @@ def cmd_message(args):
     return 0
 
 
+def cmd_explore(args):
+    """Paint a torrent-style map of the whole network as seen by the server."""
+    peers_res = call(args.server, "network/peers", {})
+    agents_res = call(args.server, "network/agents", {})
+
+    me = peers_res.get("self", {}) or {}
+    peers = peers_res.get("peers", []) or []
+    local_agents = agents_res.get("local_agents", []) or []
+    remote_agents = agents_res.get("remote_agents", []) or []
+
+    server_base = normalize_server(args.server)
+    print(f"🌐 GA2A Network Map (via {server_base})\n")
+
+    # Build instance registry: instance_name -> {host, port, is_self}
+    def _addr(host, port):
+        host = host or "?"
+        return f"{host}:{port}" if port else host
+
+    instances = {}  # name -> {"addr": str, "is_self": bool, "order": int}
+    order = 0
+
+    self_name = me.get("instance", "")
+    if self_name:
+        instances[self_name] = {
+            "addr": _addr(me.get("host", ""), me.get("port", 0)),
+            "is_self": True,
+            "order": order,
+        }
+        order += 1
+
+    for p in peers:
+        name = p.get("instance", "")
+        if not name or name in instances:
+            continue
+        instances[name] = {
+            "addr": _addr(p.get("host", ""), p.get("port", 0)),
+            "is_self": False,
+            "order": order,
+        }
+        order += 1
+
+    # Group agents by their instance field.
+    all_agents = list(local_agents) + list(remote_agents)
+    grouped = {}  # instance_name -> [agent dicts]
+    for a in all_agents:
+        inst = a.get("instance", "") or "(unknown)"
+        grouped.setdefault(inst, []).append(a)
+        # Ensure the instance shows up even if it wasn't in the peers list.
+        if inst not in instances:
+            instances[inst] = {"addr": "?", "is_self": False, "order": order}
+            order += 1
+
+    def _agent_line(a):
+        role = a.get("role", "") or "?"
+        zone = a.get("zone", "") or "?"
+        tools = a.get("tools", []) or []
+        interests = a.get("interests", []) or []
+        line = (f"   └─ {a.get('agent', '?'):<16} [{role}]"
+                f"  zone={zone}")
+        if tools:
+            line += f"   tools: {', '.join(tools)}"
+        if interests:
+            line += f"   interests: {', '.join(interests)}"
+        return line
+
+    # Print instances in discovery order.
+    for name in sorted(instances, key=lambda n: instances[n]["order"]):
+        info = instances[name]
+        tag = "  [THIS NODE]" if info["is_self"] else ""
+        print(f"📍 {name}  ({info['addr']}){tag}")
+        agents_here = grouped.get(name, [])
+        if not agents_here:
+            print("   (no agents)")
+        for a in agents_here:
+            print(_agent_line(a))
+        print()
+
+    n_local = len(local_agents)
+    n_remote = len(remote_agents)
+    print(f"Total: {len(instances)} instance(s), "
+          f"{n_local + n_remote} agent(s) ({n_local} local, {n_remote} remote)\n")
+    print("To interact: ga2a_client.py connect --from <your_agent> --agent <agent> "
+          "[--tool <tool>]")
+    print("         or: ga2a_client.py request --from <you> --target <agent> "
+          "--zone <zone> --tool <tool>")
+    return 0
+
+
+def cmd_connect(args):
+    """One-shot guided interaction: find → request → (auto) invoke."""
+    # (a) Locate the target agent.
+    find_res = call(args.server, "network/find", {"agent": args.agent})
+    results = find_res.get("results", []) or []
+
+    if not results:
+        print(f"❌ Agent '{args.agent}' not found on the network.")
+        print("   Run `ga2a_client.py explore` to see who's available.")
+        return 1
+
+    target = results[0]
+    zone = target.get("zone", "") or ""
+    src = target.get("source", "")
+    endpoint = target.get("endpoint") or target.get("peer_endpoint") or ""
+    # network/find returns either "tool" (single) or "tools" (list) per result.
+    tools = target.get("tools", []) or []
+    if not tools and target.get("tool"):
+        tools = [target["tool"]]
+
+    loc = target.get("instance", "") or endpoint
+    print(f"🔎 Found '{args.agent}' [{src}] in zone '{zone}' @ {loc}")
+    if tools:
+        print(f"   tools: {', '.join(tools)}")
+
+    # (c) Pick a tool.
+    tool = args.tool
+    if not tool:
+        if len(tools) == 1:
+            tool = tools[0]
+            print(f"   auto-selected tool: {tool}")
+        elif len(tools) > 1:
+            print(f"⚠️  '{args.agent}' offers multiple tools: {', '.join(tools)}")
+            print("   Re-run with --tool <tool> to choose one.")
+            return 1
+        else:
+            tool = ""
+            print("   no tools advertised; sending a context request (tool=\"\")")
+
+    # (d) Request access.
+    print(f"→ requesting access: {args.from_agent} → {args.agent} "
+          f"(tool: {tool or '*'})")
+    req = call(args.server, "access/request", {
+        "from_agent": args.from_agent,
+        "target": args.agent,
+        "zone": zone,
+        "interest": args.interest,
+        "tool": tool,
+    })
+    if "error" in req:
+        print(f"❌ access/request failed: {req['error']}")
+        return 1
+
+    status = req.get("status")
+    print(f"  access/request status: {status}")
+
+    # (e) Auto-approved happy path: cache grant + invoke immediately.
+    if status == "approved" and req.get("grant"):
+        grant = req["grant"]
+        save_grant(f"{args.agent}:{tool}", grant)
+        print("  🔑 grant obtained, invoking...")
+        inv = call(args.server, "agent/invoke", {
+            "target": args.agent,
+            "tool": tool,
+            "arguments": build_arguments(args.arg),
+            "zone": zone,
+            "grant": grant,
+        })
+        return _print_invoke_result(inv, args.agent, tool)
+
+    # (f) Pending — normal outcome, guide both sides.
+    rid = req.get("request_id")
+    print(f"⏳ Pending approval: {args.agent}'s owner must approve request {rid}.")
+    print(f"   Owner runs: ga2a_client.py approve --agent {args.agent} "
+          f"--request-id {rid}")
+    print(f"   Then you run: ga2a_client.py invoke --target {args.agent} "
+          f"--tool {tool} --zone {zone} "
+          + " ".join(f"--arg {a}" for a in (args.arg or [])))
+    print("\n" + dump(req))
+    return 0
+
+
 # ─── Argument parser ───────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -600,6 +777,28 @@ def build_parser() -> argparse.ArgumentParser:
     # peers
     p = sub.add_parser("peers", help="List discovered GA2A instances")
     p.set_defaults(func=cmd_peers)
+
+    # explore
+    p = sub.add_parser(
+        "explore",
+        help="Paint a torrent-style map of the whole network (recommended)",
+    )
+    p.set_defaults(func=cmd_explore)
+
+    # connect
+    p = sub.add_parser(
+        "connect",
+        help="One-shot guided interaction: find an agent, request access, invoke",
+    )
+    p.add_argument("--from", dest="from_agent", required=True,
+                   help="Your agent name")
+    p.add_argument("--agent", required=True, help="Target agent name")
+    p.add_argument("--tool",
+                   help="Tool to invoke (auto-picked if the agent has exactly one)")
+    p.add_argument("--interest", default="context exchange")
+    p.add_argument("--arg", action="append",
+                   help='Repeatable. Format "key=value" (value JSON-parsed if possible)')
+    p.set_defaults(func=cmd_connect)
 
     # find
     p = sub.add_parser("find", help="Find an agent or tool across the network")

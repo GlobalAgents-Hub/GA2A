@@ -1,5 +1,5 @@
 """
-GA2A Zone Server v0.5.0 — instância persistente do protocolo com descoberta LAN,
+GA2A Zone Server v0.6.0 — instância persistente do protocolo com descoberta LAN,
 autorização por consentimento e descoberta unicast/gossip (VPN / cross-subnet).
 
 Modelo de Contexto Distribuído (agora federado pela rede local):
@@ -7,8 +7,13 @@ Modelo de Contexto Distribuído (agora federado pela rede local):
   - O servidor faz matchmaking: cruza interesses com capabilities disponíveis
   - Agentes solicitam contexto de outros agentes e absorvem a resposta
   - Cada agente é uma fonte de contexto especializado na rede
-  - NOVO: instâncias GA2A se descobrem na LAN via broadcast UDP. Agentes de outras
+  - instâncias GA2A se descobrem na LAN via broadcast UDP. Agentes de outras
     máquinas aparecem como "remote agents" e podem ser invocados via proxy.
+  - NOVO (v0.6.0): auto-descoberta zero-config por varredura de sub-rede. No
+    startup (e periodicamente), o servidor varre a sub-rede local via TCP e faz
+    o handshake network/hello em cada host que responder — funciona mesmo quando
+    o broadcast UDP está bloqueado (isolamento de clientes em redes corporativas).
+    Não é preciso --peer: as instâncias se encontram sozinhas.
 
 Fluxo:
   1. agent/join      → entra na zona com capabilities + interests (broadcast na LAN)
@@ -20,8 +25,15 @@ Fluxo:
   7. network/find    → busca um agente ou tool em toda a rede
 
 Uso:
-  python3 ga2a_server.py --port 9420 [--name my-instance] [--broadcast-port 5060]
-                         [--peer host:port ...]
+  # Zero-config: as instâncias se descobrem sozinhas na LAN (auto-scan ON).
+  python3 ga2a_server.py --port 9420 [--name my-instance]
+
+  # Ajustes de varredura (opcional):
+  python3 ga2a_server.py --port 9420 [--scan-prefix 23] [--scan-ports 9420,9421]
+                         [--scan-interval 30] [--no-scan]
+
+  # --peer ainda funciona para cross-subnet / VPN (onde a varredura não alcança):
+  python3 ga2a_server.py --port 9420 [--broadcast-port 5060] [--peer host:port ...]
 """
 
 import sys
@@ -47,7 +59,10 @@ from a2a.mcp.registry import ZoneRegistry
 from a2a.mcp.loop_runner import AsyncLoopRunner
 from a2a.mcp.grants import GrantManager, AccessRequest, AccessGrant
 from a2a.events import EventHandler
-from a2a.discovery import NetworkDiscovery, get_local_ip
+from a2a.discovery import (
+    NetworkDiscovery, get_local_ip, iter_subnet_hosts, tcp_probe,
+)
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,18 +71,30 @@ logging.basicConfig(
 )
 log = logging.getLogger('ga2a')
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 
 class GA2AServer:
     """Servidor GA2A com zonas, matchmaking, contexto distribuído e descoberta LAN."""
 
     def __init__(self, my_port: int, instance_name: str = None, broadcast_port: int = 5060,
-                 seed_peers: list[str] = None):
+                 seed_peers: list[str] = None, auto_scan: bool = True,
+                 scan_prefix: int = 24, scan_ports: list[int] = None,
+                 scan_interval: float = 15.0):
         self.port = my_port
         self.my_port = my_port
         self.my_host = get_local_ip()
         self.instance_name = instance_name or f"ga2a-{self.my_host}-{my_port}"
+
+        # ─── Auto-descoberta por varredura de sub-rede (v0.6.0) ───
+        # Quando o broadcast UDP está bloqueado (isolamento de clientes em
+        # redes corporativas), varremos a sub-rede local via TCP e fazemos o
+        # handshake network/hello em qualquer host que responder.
+        self.auto_scan = auto_scan
+        self.scan_prefix = scan_prefix
+        self.scan_ports: list[int] = list(scan_ports or [])
+        self.scan_interval = scan_interval
+        self._scan_thread: threading.Thread = None
 
         self.event_handler = EventHandler()
         self.zones: dict[str, ZoneRegistry] = {}
@@ -151,11 +178,21 @@ class GA2AServer:
         self._seed_unicast_peers()
         self._start_gossip_loop()
 
+        # Auto-descoberta por varredura de sub-rede (v0.6.0)
+        self._start_scan_loop()
+
         log.info(f"🌐 GA2A Server v{VERSION} rodando")
         log.info(f"   Instância: {self.instance_name}")
         log.info(f"   Host LAN:  {self.my_host}:{self.my_port}")
         log.info(f"   Endpoint MCP: http://{self.my_host}:{self.my_port}/mcp")
         log.info(f"   Broadcast LAN: porta {self.discovery.broadcast_port}")
+        if self.auto_scan:
+            log.info(
+                f"   Auto-scan: ON (sub-rede {self.my_host}/{self.scan_prefix}, "
+                f"portas {self._scan_ports_set()}, a cada {self.scan_interval:.0f}s)"
+            )
+        else:
+            log.info("   Auto-scan: OFF")
         if self._seed_peers:
             log.info(f"   Seed peers (unicast): {self._seed_peers}")
         log.info(f"   Zonas: {list(self.zones.keys())}")
@@ -412,21 +449,129 @@ class GA2AServer:
             self._hello_seed(addr)
 
     def _start_gossip_loop(self):
-        """Re-contata seeds periodicamente para manter a malha viva (unicast)."""
-        if not self._seed_peers:
-            return
-
+        """Re-contata seeds e peers conhecidos periodicamente para manter a
+        malha viva (unicast). Re-cumprimentar peers descobertos via scan (sem
+        --peer) refresca suas listas de agentes mesmo entre varreduras."""
         def _loop():
             interval = max(self.discovery.broadcast_interval * 2, 1)
             while self._running:
                 time.sleep(interval)
                 if not self._running:
                     break
-                for addr in list(self._seed_peers):
+                # Seeds explícitos (--peer) + todos os peers já conhecidos:
+                # o handshake refresca a lista de agentes atual de cada um.
+                endpoints = set(self._seed_peers)
+                endpoints.update(self._known_peer_endpoints())
+                for addr in endpoints:
                     self._hello_seed(addr)
 
         self._gossip_thread = threading.Thread(target=_loop, daemon=True)
         self._gossip_thread.start()
+
+    # ─── Auto-descoberta por varredura de sub-rede (v0.6.0) ──────
+
+    def _scan_ports_set(self) -> list[int]:
+        """Portas a sondar: a nossa própria + as extras configuradas."""
+        ports = {self.my_port}
+        ports.update(self.scan_ports)
+        return sorted(ports)
+
+    def _known_peer_endpoints(self) -> set[str]:
+        """Conjunto de 'host:port' dos peers já conhecidos (para deduplicar)."""
+        known = set()
+        for peer in self.discovery.get_peers().values():
+            host = peer.get("host", "")
+            port = peer.get("port", 0)
+            if host and port:
+                known.add(f"{host}:{port}")
+        return known
+
+    def _run_scan_once(self):
+        """Executa uma varredura da sub-rede: sonda TCP em paralelo e faz
+        network/hello em cada host:porta que aceitar conexão."""
+        ports = self._scan_ports_set()
+        try:
+            candidates = list(iter_subnet_hosts(self.my_host, self.scan_prefix))
+        except Exception as e:
+            log.debug(f"Falha ao enumerar hosts da sub-rede: {e}")
+            return
+
+        # Também sondar o nosso próprio host nas OUTRAS portas: permite que
+        # múltiplas instâncias GA2A na mesma máquina (portas diferentes) se
+        # descubram, mesmo com broadcast desabilitado/isolado. O par
+        # (my_host, my_port) é excluído logo abaixo.
+        if self.my_host not in candidates:
+            candidates.append(self.my_host)
+
+        # Pares (host, port) a sondar, pulando a nós mesmos.
+        targets = [
+            (host, port)
+            for host in candidates
+            for port in ports
+            if not (host == self.my_host and port == self.my_port)
+        ]
+        if not targets:
+            return
+
+        open_targets: list[tuple[str, int]] = []
+        try:
+            with ThreadPoolExecutor(max_workers=50) as pool:
+                future_map = {
+                    pool.submit(tcp_probe, host, port): (host, port)
+                    for host, port in targets
+                }
+                for fut in as_completed(future_map):
+                    host, port = future_map[fut]
+                    try:
+                        if fut.result():
+                            open_targets.append((host, port))
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.debug(f"Falha na varredura TCP da sub-rede: {e}")
+            return
+
+        # Handshake nos hosts abertos. Re-cumprimentar peers já conhecidos é
+        # essencial: o handshake network/hello refresca a lista de agentes
+        # atual de cada peer, então agentes que entraram APÓS a descoberta
+        # inicial se propagam pela malha.
+        before = set(self.discovery.get_peers().keys())
+        for host, port in open_targets:
+            endpoint = f"{host}:{port}"
+            try:
+                # Re-hello known peers too: the handshake refreshes their
+                # current agent list, so agents that joined after initial
+                # discovery propagate across the mesh.
+                self._hello_seed(endpoint)
+            except Exception as e:
+                log.debug(f"network/hello falhou para {endpoint}: {e}")
+
+        after = set(self.discovery.get_peers().keys())
+        found = len(after - before)
+        if found:
+            log.info(f"🔎 scan encontrou {found} instância(s) GA2A")
+
+    def _start_scan_loop(self):
+        """Varre a sub-rede periodicamente em background (não bloqueia o start)."""
+        if not self.auto_scan:
+            return
+
+        def _loop():
+            # Pequeno atraso para o servidor terminar de subir.
+            time.sleep(2)
+            while self._running:
+                try:
+                    self._run_scan_once()
+                except Exception as e:
+                    log.debug(f"Erro na varredura de sub-rede: {e}")
+                # Aguardar o intervalo, checando _running para sair rápido.
+                slept = 0.0
+                while self._running and slept < self.scan_interval:
+                    time.sleep(min(1.0, self.scan_interval - slept))
+                    slept += 1.0
+
+        self._scan_thread = threading.Thread(target=_loop, daemon=True)
+        self._scan_thread.start()
 
     def _create_app(self):
         server = self
@@ -1419,12 +1564,24 @@ async def _send(send_fn, status, body, content_type="application/json"):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="GA2A Zone Server v0.5.0 (LAN discovery + consent + unicast/gossip)")
+        description="GA2A Zone Server v0.6.0 (LAN auto-discovery: broadcast + subnet scan + unicast/gossip)")
     parser.add_argument("--port", type=int, default=0, help="MCP port (0=auto)")
     parser.add_argument("--name", type=str, default=None, help="Instance name (default: ga2a-<ip>-<port>)")
     parser.add_argument("--broadcast-port", type=int, default=5060, help="UDP broadcast port for LAN discovery")
     parser.add_argument("--peer", action="append", default=None,
                         help="host:port of a known GA2A instance to seed from (unicast/VPN). Repeatable.")
+    # ─── Auto-descoberta por varredura de sub-rede (v0.6.0) ───
+    parser.add_argument("--scan", "--auto-discover", dest="auto_scan", action="store_true", default=True,
+                        help="Enable subnet auto-scan (ON by default).")
+    parser.add_argument("--no-scan", dest="auto_scan", action="store_false",
+                        help="Disable subnet auto-scan.")
+    parser.add_argument("--scan-prefix", type=int, default=24,
+                        help="Subnet prefix length to scan (24=254 hosts, 23=~510). Default: 24")
+    parser.add_argument("--scan-ports", type=str, default=None,
+                        help="Comma-separated extra ports to probe besides the server's own port "
+                             "(e.g. 9440,9441). Default: just the server port.")
+    parser.add_argument("--scan-interval", type=float, default=15.0,
+                        help="Seconds between subnet rescans. Default: 15.0")
     args = parser.parse_args()
 
     if args.port == 0:
@@ -1433,11 +1590,27 @@ def main():
         args.port = s.getsockname()[1]
         s.close()
 
+    # Parse extra scan ports into a list of ints (ignore blanks/invalids).
+    scan_ports: list[int] = []
+    if args.scan_ports:
+        for part in args.scan_ports.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                scan_ports.append(int(part))
+            except ValueError:
+                log.warning(f"Ignorando porta de scan inválida: {part!r}")
+
     server = GA2AServer(
         my_port=args.port,
         instance_name=args.name,
         broadcast_port=args.broadcast_port,
         seed_peers=args.peer,
+        auto_scan=args.auto_scan,
+        scan_prefix=args.scan_prefix,
+        scan_ports=scan_ports,
+        scan_interval=args.scan_interval,
     )
 
     def _sig(sig, frame):

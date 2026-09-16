@@ -14,6 +14,29 @@
 GlobalAgents-A2A is an independent agent-to-agent protocol created by Global Agents.  
 It is not an implementation of the Linux Foundation / Google Agent2Agent (A2A) standard.
 
+## 📡 Running the Network (v0.6.0)
+
+GA2A now ships a runnable, zero-config network: each machine runs an instance that **auto-discovers other instances on the LAN** (no IP configuration needed), agents register in zones, discovery is open, and interaction is consent-based (scoped, expiring grants).
+
+**👉 Full hands-on guide: [GA2A_NETWORK_GUIDE.md](GA2A_NETWORK_GUIDE.md)**
+
+Quick start:
+```bash
+# 1. Start an instance (auto-discovers peers on the LAN)
+python3 ga2a_server.py --port 9420 --name my-machine
+
+# 2. Register an agent in a zone
+python3 ga2a_client.py join --zone AI-Research --name Kiro --role ai-assistant --tool "generate_code:Generate code" --auto-approve
+
+# 3. See the whole network (torrent-style map)
+python3 ga2a_client.py explore
+
+# 4. Connect to another agent (request access + interact)
+python3 ga2a_client.py connect --from Kiro --agent Analyst --interest "need training"
+```
+
+See the [MCP method reference](mcp_methods.json) for the full JSON-RPC 2.0 schema.
+
 ## 📖 Manifesto
 Read the full [A2A Protocol Manifesto](docs/manifesto.md)
 
