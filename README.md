@@ -22,6 +22,8 @@ GA2A now ships a runnable, zero-config network: each machine runs an instance th
 
 **🔌 Máquinas em redes diferentes (VPN)? Veja [GA2A_VPN_GUIDE.md](GA2A_VPN_GUIDE.md)**
 
+**📜 Version history: [CHANGELOG.md](CHANGELOG.md) · 🔎 External tools & feasibility report: [docs/external-tools-report.md](docs/external-tools-report.md)**
+
 Quick start:
 ```bash
 # 1. Start an instance (auto-discovers peers on the LAN)
@@ -294,15 +296,22 @@ See `CONTRIBUTING.md` for contributor guidelines, a submit-a-PR checklist and on
 
 ## Current Status
 
-The A2A Protocol currently implements a **multi-threaded socket-based architecture** 
-(✅ **Phase 1 - MVP complete**) as the foundation for peer-to-peer communication. 
-Each agent runs as an independent peer that can connect directly to other peers without a central server.
+The earlier **multi-threaded TCP/socket MVP** (✅ Phase 1) remains the foundation of the protocol. On top of it, the project now has an MCP-based network layer (v0.6.0).
 
 **Implemented:**
-- ✅ Direct peer-to-peer socket connections (TCP)
-- ✅ Multi-threaded concurrent agent handling
-- ✅ Decentralized zone-based communication
-- ✅ No central server required
+- ✅ MCP layer under `src/a2a/mcp/`: server, client pool, zone registry, transport bridge, zone-scoped HMAC auth, and consent grants
+- ✅ Persistent zone server (`ga2a_server.py`, v0.6.0) exposing 21 JSON-RPC 2.0 methods at `POST /mcp` (schema in [mcp_methods.json](mcp_methods.json))
+- ✅ Peer discovery on three channels: UDP broadcast, zero-config TCP subnet scan, and unicast seed (`--peer`) with gossip
+- ✅ Open discovery and consent-based interaction (grants scoped to a tool, a zone, or `*`, with TTL, revocable)
+- ✅ CLI client (`ga2a_client.py`) with `explore` and `connect`
+- ✅ 269 tests in `tests/test_mcp/` (they need `pytest-asyncio`; run them with an interpreter that has it installed)
+
+**Known limitations:**
+- A tool only executes if the agent exposes its own MCP endpoint. An agent registered only via `join` is discoverable and authorizable, but `invoke` returns "no live endpoint".
+- State (zones, agents, grants) is in memory only; nothing is persisted.
+- Transport is plain HTTP with no encryption. Use it inside a trusted network or VPN.
+- Machines on network segments that do not route to each other need a mesh VPN (see [GA2A_VPN_GUIDE.md](GA2A_VPN_GUIDE.md)). Validated: a client on one machine joins a server on another machine over Tailscale. Server-to-server federation between physical machines is not yet tested.
+- The `mcp` package is declared in `pyproject.toml` but not imported; the server speaks its own JSON-RPC subset.
 
 ## 🚀 Roadmap
 
@@ -311,18 +320,18 @@ Each agent runs as an independent peer that can connect directly to other peers 
 - Minimal message structure
 - Functional proof of concept
 
-### 🔄 Phase 2 – Protocol Evolution
-- **Peer discovery** mechanisms
-- **Flexible transport** (support for WebRTC, QUIC, UDP)
-- **End-to-end encryption** for native security
+### 🔄 Phase 2 – Protocol Evolution (in progress)
+- ✅ **Peer discovery**: done (UDP broadcast, TCP subnet scan, unicast seed + gossip)
+- ⏳ **Flexible transport** (support for WebRTC, QUIC, UDP): not started
+- ⏳ **End-to-end encryption** for native security: not started
 
-### 🔮 Phase 3 – Symbolic Layer
+### 🔮 Phase 3 – Symbolic Layer (not started)
 - Definition of **symbolic message formats**
 - Standardization of semantics and interaction rituals
 - Tools for inspection and validation
 
-### 🌐 Phase 4 – Expansion
-- Integration with **open networks** (Web3, IPFS, libp2p)
+### 🌐 Phase 4 – Expansion (not started)
+- Integration with **open networks** (Web3, IPFS, libp2p). None of these exist yet; only an MCP-based interoperability layer is in place.
 - Interoperability across decentralized ecosystems
 - Creation of a **community repository of agents**
 
@@ -330,6 +339,14 @@ Each agent runs as an independent peer that can connect directly to other peers 
 - Commercial version via **Global Agents**
 - Premium services, certifications, and consulting
 - Revenue reinvested to strengthen the community
+
+### ➡️ Next steps
+- Choose the VPN for cross-segment links (NetBird or Headscale if self-hosting is required)
+- Test server-to-server federation (`--peer` + gossip, `explore`, `access/request`, `invoke`) between two physical machines over the VPN
+- Host tools inside the GA2A server so `invoke` can execute
+- Add persistence for zones, agents, and grants
+- Add transport encryption
+- Resolve the unused `mcp` dependency (remove it or adopt the SDK)
 
 ## Acknowledgements
 GlobalAgents-A2A emerged from early explorations with collaborators around symbolic agent societies.  

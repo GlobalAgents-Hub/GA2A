@@ -8,6 +8,9 @@ O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). A
 ### Documentação
 - Adicionado `CHANGELOG.md`.
 - Adicionado `docs/external-tools-report.md`, relatório de viabilidade e uso de ferramentas externas (bibliotecas, VPNs mesh e ferramentas do ambiente).
+- `README.md` atualizado com links para o `CHANGELOG.md` e para o relatório de ferramentas externas, e com as seções "Current Status" e "Roadmap" reescritas.
+- `GA2A_VPN_GUIDE.md` atualizado com notas de licença e limites dos planos gratuitos e com alternativas open source (Headscale, NetBird e Nebula).
+- Registrado o resultado validado com Tailscale em `GA2A_VPN_GUIDE.md`, `docs/external-tools-report.md` e `README.md`: um cliente em outra máquina entrou em uma zona compartilhada em um servidor remoto (`100.x.x.x:9420`). A federação entre servidores (`--peer` e gossip) segue sem teste.
 
 ## [0.6.0] - 2026-09-16
 

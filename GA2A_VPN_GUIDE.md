@@ -24,6 +24,16 @@ Se o `ping` falha ou o `curl` dá timeout / retorna "Network is unreachable", si
 
 A ideia da mesh VPN: cada máquina ganha um **IP virtual** que a alcança independentemente da rede física em que ela está. Depois é só apontar o GA2A para esse IP virtual com `--peer`.
 
+## Antes de escolher: limites e licenças
+
+Os planos gratuitos têm limites e restrições de uso:
+
+- **Tailscale Personal:** gratuito para até 6 usuários, mas apenas para uso não comercial.
+- **ZeroTier Personal:** gratuito para 10 dispositivos, 1 rede e 1 administrador, apenas para uso não comercial.
+- **NetBird (cloud):** o plano gratuito cobre até 5 usuários e 100 máquinas, e o NetBird também pode ser self-hosted.
+
+Confirme os termos de licença antes de usar qualquer plano gratuito em ambiente corporativo. Preços e limites mudam, então consulte as páginas oficiais. Para a comparação completa e as fontes, veja [docs/external-tools-report.md](docs/external-tools-report.md).
+
 ## Opção A — Tailscale (recomendado)
 
 O Tailscale é simples, gratuito para uso pessoal, e cada máquina recebe um IP na faixa `100.x.x.x` que funciona de qualquer rede.
@@ -96,9 +106,45 @@ python3 ga2a_client.py explore
 
 O `explore` agora deve listar **2 instâncias** (a local e a remota, via VPN), com seus agentes.
 
+### Resultado validado com Tailscale
+
+Um cliente GA2A em uma máquina diferente da que roda o servidor entrou em uma zona no servidor remoto, alcançado pelo endereço Tailscale (`100.x.x.x` é um placeholder para o IP real):
+
+```bash
+python3 ga2a_client.py --server 100.x.x.x:9420 join --zone AI-Research --name agente-victor --role research-assistant --tool "write_paper:Redige artigos científicos" --tool "review_paper:Revisa artigos científicos e sugere melhorias" --interest literature-review --interest research-methodology --interest data-analysis
+```
+
+Saída observada:
+
+```text
+✅ agente-victor joined zone 'AI-Research' (status: joined)
+Peers in zone: Arthur-Agent
+Matches: (none)
+```
+
+O JSON retornado trouxe `status: joined`, `zone: AI-Research`, `agent: agente-victor`, `peers: ["Arthur-Agent"]` e `matches: []`. O `Matches` veio vazio porque nenhum interesse declarado coincidiu com as tools ou o papel de outro agente da zona.
+
+**O que isso comprova:**
+
+- Uma VPN mesh (Tailscale) permite que máquinas em segmentos de rede que não roteiam entre si alcancem um servidor GA2A.
+- O `join` de um cliente em um servidor remoto funciona entre máquinas.
+- Duas pessoas podem compartilhar uma zona em um mesmo servidor: a zona já listava o `Arthur-Agent`, registrado por outra pessoa.
+
+**O que ainda não foi comprovado:**
+
+- Federação servidor a servidor entre duas máquinas físicas (`--peer` mais gossip).
+- O comando `explore` mostrando duas instâncias.
+- `access/request`, `grant` e `invoke` entre máquinas.
+- Execução de tools: o `invoke` ainda retorna `no live endpoint` para agentes sem endpoint próprio.
+- Outras VPNs: só o Tailscale foi testado. ZeroTier, NetBird, Headscale e Nebula não foram exercitados.
+
 ## Opção B — ZeroTier (alternativa)
 
-O ZeroTier segue o mesmo conceito de rede virtual em malha. Passos gerais:
+O ZeroTier segue o mesmo conceito de rede virtual em malha.
+
+**Nota:** o plano gratuito é limitado a 10 dispositivos e a uso não comercial.
+
+Passos gerais:
 
 1. Instale o ZeroTier a partir de https://www.zerotier.com/download/ (Linux, Windows, etc.).
 2. Crie uma rede em https://my.zerotier.com/ e copie o **Network ID** (16 caracteres).
@@ -120,6 +166,32 @@ O ZeroTier segue o mesmo conceito de rede virtual em malha. Passos gerais:
    ```bash
    python3 ga2a_server.py --port 9420 --name maquina-a --peer <ip-zerotier-de-B>:9420
    ```
+
+## Opção C — Alternativas open source (self-hosted)
+
+Para ambientes corporativos em que os planos gratuitos acima não servem, há alternativas open source. **Para as três abaixo, este guia apresenta apenas o conceito e por onde começar. Não há instruções passo a passo testadas.**
+
+### Headscale
+
+Servidor de coordenação self-hosted, compatível com o cliente do Tailscale. Exige um servidor que as duas máquinas consigam alcançar. Os detalhes de licença não foram verificados aqui. Documentação oficial: https://headscale.net
+
+### NetBird
+
+Open source, com plano gratuito na nuvem ou instalação self-hosted. Há menção a uma licença comercial paga para self-hosting em empresas, então confirme os termos antes de usar. Documentação oficial: https://docs.netbird.io
+
+### Nebula
+
+Open source, com certificados gerenciados manualmente e um nó lighthouse para a descoberta entre as máquinas. Documentação oficial: https://nebula.defined.net/docs/
+
+### Usando o GA2A sobre qualquer uma delas
+
+Os comandos do GA2A são idênticos aos da Opção A. O servidor sobe com `--peer` apontando para o IP virtual e a porta da outra máquina:
+
+```bash
+python3 ga2a_server.py --port 9420 --name maquina-a --peer <ip-virtual-de-B>:9420
+```
+
+Para a comparação e as fontes, veja [docs/external-tools-report.md](docs/external-tools-report.md).
 
 ## Windows + WSL (importante)
 

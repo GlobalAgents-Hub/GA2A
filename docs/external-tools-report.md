@@ -6,7 +6,7 @@ Relatório de decisões e achados sobre as ferramentas externas usadas e avaliad
 
 - A camada MCP do GA2A é viável e roda só com bibliotecas leves (`uvicorn`, `httpx`). Não depende do SDK oficial do MCP.
 - O gargalo real do projeto é a rede, não o código. Entre segmentos isolados de uma rede corporativa é preciso uma VPN mesh.
-- As VPNs avaliadas têm planos gratuitos com restrições de uso comercial. Nenhuma foi testada entre duas máquinas reais.
+- As VPNs avaliadas têm planos gratuitos com restrições de uso comercial. Entre máquinas reais só o Tailscale foi exercitado, e apenas no caminho cliente-servidor.
 
 ## 1. Bibliotecas usadas no código
 
@@ -33,8 +33,26 @@ O design escolheu o SDK oficial do MCP, mas a implementação ficou como servido
 1. A descoberta por broadcast UDP funcionou nos testes locais, mas não é confiável em redes corporativas.
 2. A varredura TCP da sub-rede contorna o isolamento de clientes dentro de um mesmo segmento.
 3. O teste entre duas máquinas em segmentos diferentes (`10.202.92.x` e `10.200.66.x`) deu `Network is unreachable`. A rede corporativa não roteia entre esses segmentos.
-4. Isso exige uma VPN mesh. O Tailscale foi instalado em uma ponta, mas a outra máquina nunca entrou na mesma tailnet.
+4. Isso exige uma VPN mesh. Com o Tailscale, um cliente em outra máquina alcançou o servidor pelo endereço da VPN e entrou em uma zona compartilhada (veja "Resultado observado com Tailscale").
 5. Pelo trial e pelas restrições de uso corporativo, passaram a ser avaliadas alternativas open source.
+
+### Resultado observado com Tailscale
+
+Um cliente GA2A em uma máquina diferente da do servidor executou `join` contra o servidor pelo endereço Tailscale (`100.x.x.x:9420`) na zona `AI-Research` com o agente `agente-victor`. O servidor respondeu `status: joined`, listou `Arthur-Agent` (registrado por outra pessoa) como peer da zona e devolveu `matches: []`, pois nenhum interesse declarado coincidiu com tools ou papel de outro agente.
+
+O que isso comprova:
+
+- Uma VPN mesh (Tailscale) permite que máquinas em segmentos que não roteiam entre si alcancem um servidor GA2A.
+- O `join` de um cliente em um servidor remoto funciona entre máquinas.
+- Duas pessoas podem compartilhar uma zona em um mesmo servidor.
+
+O que ainda não foi comprovado:
+
+- Federação servidor a servidor entre máquinas físicas (`--peer` mais gossip).
+- O `explore` mostrando duas instâncias.
+- `access/request`, `grant` e `invoke` entre máquinas.
+- Execução de tools: o `invoke` ainda retorna `no live endpoint` para agentes sem endpoint próprio.
+- Outras VPNs: só o Tailscale foi exercitado. ZeroTier, NetBird, Headscale e Nebula não foram.
 
 ### Comparação
 
@@ -75,7 +93,7 @@ O design escolheu o SDK oficial do MCP, mas a implementação ficou como servido
 | Tema | Veredito |
 |---|---|
 | Protocolo e descoberta na mesma LAN | Viável, validado apenas com instâncias na mesma máquina |
-| Troca de contexto entre redes isoladas | Depende da VPN, ainda não testado entre máquinas reais |
+| Troca de contexto entre redes isoladas | Validado em parte: cliente em uma máquina entrou em servidor remoto pelo Tailscale. A federação servidor a servidor ainda não foi testada |
 | Uso corporativo das VPNs gratuitas | Incerto, as licenças são não comerciais |
 | Execução real das tools | Não resolvido: falta um endpoint por agente ou hospedar as tools no servidor |
 
@@ -83,6 +101,6 @@ Ordem sugerida:
 
 1. Decidir a VPN. Para uso corporativo, NetBird ou Headscale (ambos self-host) evitam a restrição de uso não comercial, mas exigem um servidor acessível pelas duas pontas.
 2. Resolver a divergência da dependência `mcp` (remover ou adotar).
-3. Fazer o teste entre duas máquinas físicas.
+3. Testar a federação servidor a servidor (`--peer` e gossip, `explore`, `access/request` e `invoke`) entre duas máquinas físicas pela VPN.
 4. Corrigir o ambiente de testes do `.venv`.
 5. Atualizar o `GA2A_VPN_GUIDE.md` com a alternativa escolhida.
